@@ -1,0 +1,568 @@
+
+<!DOCTYPE html>
+<html>
+<head>
+    <title>Fortigate Policy Parser</title>
+    <style>
+        .table-container {
+            max-height: 400px; /* Adjust height as needed */
+            overflow: auto;    /* enable both directions if needed */
+            border: 1px solid #ccc;
+            margin-top: 15px;
+        }
+        table {
+            width: 100%;
+            border-collapse: collapse;
+        }
+        th, td {
+            border: 1px solid #ccc;
+            padding: 8px;
+            text-align: left;
+        }
+        th {
+            background-color: #f4f4f4;
+            position: sticky;
+            top: 0;
+            z-index: 2;
+        }
+        td.dragging {
+            opacity: 0.5;
+            background-color: #f0f0f0;
+        }
+        .row-added {
+            background-color: #d4edda; /* green: target of a copy drop */
+        }
+        .row-removed {
+            background-color: #f8d7da; /* red: flagged for deletion (deleted or moved-from) */
+            opacity: 0.85;
+        }
+        .row-edited {
+            background-color: #fff3cd; /* yellow: inline edited */
+        }
+        .controls {
+            margin-top: 15px;
+        }
+        .deleteBtn, .undoBtn {
+            background-color: #dc3545;
+            color: white;
+            border: none;
+            padding: 5px 10px;
+            cursor: pointer;
+            margin-left: 5px;
+        }
+        .undoBtn {
+            background-color: #28a745;
+        }
+        .deleteBtn:hover {
+            background-color: #c82333;
+        }
+        .undoBtn:hover {
+            background-color: #218838;
+        }
+        /* Editable CLI output area */
+        #cliOutput {
+            width: 100%;
+            min-height: 220px;
+            font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", "Courier New", monospace;
+            font-size: 13px;
+            line-height: 1.4;
+            box-sizing: border-box;
+            margin-top: 12px;
+            padding: 10px;
+            border: 1px solid #ccc;
+            resize: vertical; /* allow user to resize */
+            white-space: pre; /* preserve newlines and spacing */
+        }
+    </style>
+</head>
+<body>
+    <h1>Fortigate CLI Policy Parser</h1>
+    <form method="post">
+        {% csrf_token %}
+        {{ form.as_p }}
+        <button type="submit">Parse</button>
+    </form>
+
+    {% if parsed_data %}
+        <h2>Parsed Policies</h2>
+        <div class="controls">
+            <button type="button" id="resetBtn">Reset Table</button>
+            <button type="button" id="generateCliBtn">Generate CLI Config</button>
+            <button type="button" id="validateCliBtn">Validate CLI</button>
+            <button type="button" id="copyCliBtn">Copy CLI</button>
+            <button type="button" id="downloadCliBtn">Download CLI Config</button>
+            <button type="button" id="downloadDeletedBtn">Download Deleted Rules</button>
+            <button type="button" id="undoLastChangeBtn">Undo Last Change</button>
+            <button type="button" id="saveToServerBtn">Save Changes to Server</button>
+        </div>
+
+        <div class="table-container">
+            <table id="policyTable">
+                <thead>
+                    <tr>
+                        <th>ID</th>
+                        <th>Source Interface</th>
+                        <th>Destination Interface</th>
+                        <th>Action</th>
+                        <th>Source Address</th>
+                        <th>Destination Address</th>
+                        <th>Service</th>
+                        <th>Comments</th>
+                        <th>Actions</th>
+                    </tr>
+                </thead>
+                <tbody>
+                    {% for policy in parsed_data %}
+                    <tr>
+                        <td draggable="true">{{ policy.id }}</td>
+                        <td draggable="true">{{ policy.srcintf }}</td>
+                        <td draggable="true">{{ policy.dstintf }}</td>
+                        <td draggable="true">{{ policy.action }}</td>
+                        <td draggable="true">{{ policy.srcaddr }}</td>
+                        <td draggable="true">{{ policy.dstaddr }}</td>
+                        <td draggable="true">{{ policy.service }}</td>
+                        <td contenteditable="true" draggable="true">{{ policy.comments }}</td>
+                        <td>
+                            <button class="deleteBtn">Delete</button>
+                            <button class="undoBtn" style="display:inline-block;">Undo</button>
+                        </td>
+                    </tr>
+                    {% endfor %}
+                </tbody>
+            </table>
+        </div>
+
+        <h3>Generated CLI Config (editable):</h3>
+        <textarea id="cliOutput" placeholder="Click 'Generate CLI Config' to load, then edit as needed..."></textarea>
+    {% endif %}
+
+    <script>
+        let draggedCell = null;
+        let originalTableHTML = '';
+        let deletedPolicies = [];
+        let changeHistory = [];
+
+        function recordChange(row, previousState) {
+            changeHistory.push({ row: row, previousState: previousState });
+        }
+
+        window.addEventListener('DOMContentLoaded', () => {
+            const tableBody = document.querySelector('#policyTable tbody');
+            if (tableBody) {
+                originalTableHTML = tableBody.innerHTML;
+            }
+            attachDeleteUndoEvents();
+            attachEditEvents();
+        });
+
+        // Drag-and-drop logic (COPY behavior).
+        // If the source row differs from the target row, mark the SOURCE as row-removed (red) and add to deletedPolicies.
+        document.addEventListener('dragstart', (e) => {
+            if (e.target.tagName === 'TD') {
+                draggedCell = e.target;
+                e.target.classList.add('dragging');
+                e.dataTransfer.setData('text/plain', e.target.textContent);
+            }
+        });
+
+        document.addEventListener('dragend', (e) => {
+            if (e.target.tagName === 'TD') {
+                e.target.classList.remove('dragging');
+                draggedCell = null;
+            }
+        });
+
+        // --- AUTO-SCROLL WHILE DRAGGING ---
+        // Smoothly scroll the table container when cursor is near its top/bottom edges.
+        const tableContainer = document.querySelector('.table-container');
+        const EDGE_THRESHOLD = 60;      // px from top/bottom edge to start scrolling
+        const MAX_SCROLL_STEP = 30;     // max px per dragover tick
+
+        document.addEventListener('dragover', (e) => {
+            if (e.target.tagName === 'TD') {
+                e.preventDefault(); // required to allow drop on TDs
+            } else {
+                // still allow scrolling even if over other elements within container
+                e.preventDefault();
+            }
+
+            if (!tableContainer) return;
+
+            const rect = tableContainer.getBoundingClientRect();
+            const y = e.clientY;
+
+            // Near top edge -> scroll up
+            if (y < rect.top + EDGE_THRESHOLD) {
+                const proximity = Math.max(0, rect.top + EDGE_THRESHOLD - y);
+                const intensity = proximity / EDGE_THRESHOLD; // 0..1
+                const step = Math.ceil(intensity * MAX_SCROLL_STEP);
+                tableContainer.scrollTop = Math.max(0, tableContainer.scrollTop - step);
+            }
+            // Near bottom edge -> scroll down
+            else if (y > rect.bottom - EDGE_THRESHOLD) {
+                const proximity = Math.max(0, y - (rect.bottom - EDGE_THRESHOLD));
+                const intensity = proximity / EDGE_THRESHOLD; // 0..1
+                const step = Math.ceil(intensity * MAX_SCROLL_STEP);
+                tableContainer.scrollTop = Math.min(
+                    tableContainer.scrollHeight,
+                    tableContainer.scrollTop + step
+                );
+            }
+        });
+
+        // Handle the actual drop (copy text to target)
+        document.addEventListener('drop', (e) => {
+            if (e.target.tagName === 'TD' && draggedCell) {
+                e.preventDefault();
+                const draggedText = draggedCell.textContent.trim().replace(/"/g, '');
+                if (draggedText) {
+                    const targetRow = e.target.closest('tr');
+                    const sourceRow = draggedCell.closest('tr');
+
+                    // Record pre-change state of the TARGET row
+                    const previousState = targetRow.innerHTML;
+                    recordChange(targetRow, previousState);
+
+                    // COPY behavior: append dragged text to target cell; DO NOT clear source
+                    e.target.textContent = e.target.textContent.trim()
+                        ? e.target.textContent.trim() + " " + draggedText
+                        : draggedText;
+
+                    // Visual cue: mark target row as added (green)
+                    targetRow.classList.add('row-added');
+
+                    // If source and target are different rows, mark source as removed (red) and track deletion
+                    if (sourceRow !== targetRow) {
+                        if (!sourceRow.classList.contains('row-removed')) {
+                            const cells = sourceRow.querySelectorAll('td');
+                            if (cells.length >= 9) {
+                                const policyObj = {
+                                    id: cells[0].textContent.trim(),
+                                    srcintf: cells[1].textContent.trim(),
+                                    dstintf: cells[2].textContent.trim(),
+                                    action: cells[3].textContent.trim(),
+                                    srcaddr: cells[4].textContent.trim(),
+                                    dstaddr: cells[5].textContent.trim(),
+                                    service: cells[6].textContent.trim(),
+                                    comments: cells[7].textContent.trim()
+                                };
+                                const exists = deletedPolicies.some(p => p.id === policyObj.id);
+                                if (!exists) deletedPolicies.push(policyObj);
+                            }
+                        }
+                        sourceRow.classList.add('row-removed'); // RED: will be deleted
+                    }
+                }
+            }
+        });
+
+        // Reset button
+        document.getElementById('resetBtn').addEventListener('click', () => {
+            const tableBody = document.querySelector('#policyTable tbody');
+            if (tableBody) {
+                tableBody.innerHTML = originalTableHTML;
+            }
+            document.querySelectorAll('#policyTable tr').forEach(row => {
+                row.classList.remove('row-added', 'row-removed', 'row-edited');
+            });
+            const cliOutput = document.getElementById('cliOutput');
+            if (cliOutput) cliOutput.value = '';
+            deletedPolicies = [];
+            changeHistory = [];
+            attachDeleteUndoEvents();
+            attachEditEvents();
+        });
+
+        // Inline edit tracking (comments only)
+        function attachEditEvents() {
+            document.querySelectorAll('#policyTable td[contenteditable="true"]').forEach(cell => {
+                cell.addEventListener('input', (e) => {
+                    const row = e.target.closest('tr');
+                    const previousState = row.innerHTML;
+                    recordChange(row, previousState);
+                    row.classList.add('row-edited');
+                });
+            });
+        }
+
+        // Delete and Undo functionality (red = will be deleted)
+        function attachDeleteUndoEvents() {
+            document.querySelectorAll('.deleteBtn').forEach(btn => {
+                btn.addEventListener('click', (e) => {
+                    const row = e.target.closest('tr');
+                    const previousState = row.innerHTML;
+                    recordChange(row, previousState);
+
+                    const cells = row.querySelectorAll('td');
+                    if (cells.length >= 9) {
+                        const policyObj = {
+                            id: cells[0].textContent.trim(),
+                            srcintf: cells[1].textContent.trim(),
+                            dstintf: cells[2].textContent.trim(),
+                            action: cells[3].textContent.trim(),
+                            srcaddr: cells[4].textContent.trim(),
+                            dstaddr: cells[5].textContent.trim(),
+                            service: cells[6].textContent.trim(),
+                            comments: cells[7].textContent.trim()
+                        };
+                        const exists = deletedPolicies.some(p => p.id === policyObj.id);
+                        if (!exists) deletedPolicies.push(policyObj);
+                    }
+                    row.classList.add('row-removed'); // RED: flagged for deletion
+                });
+            });
+
+            document.querySelectorAll('.undoBtn').forEach(btn => {
+                btn.addEventListener('click', (e) => {
+                    const row = e.target.closest('tr');
+                    const id = row.querySelector('td').textContent.trim();
+                    deletedPolicies = deletedPolicies.filter(policy => policy.id !== id);
+                    row.classList.remove('row-removed'); // remove deletion flag
+                });
+            });
+        }
+
+        // Undo Last Change (row-level state)
+        document.getElementById('undoLastChangeBtn').addEventListener('click', () => {
+            if (changeHistory.length === 0) {
+                alert('No changes to undo.');
+                return;
+            }
+            const lastChange = changeHistory.pop();
+            lastChange.row.innerHTML = lastChange.previousState;
+            attachDeleteUndoEvents();
+            attachEditEvents();
+        });
+
+        // Helper: Quote each item individually
+        function quoteEach(value) {
+            return value
+                .replace(/"/g, '')
+                .split(/\s+/)
+                .filter(v => v.length > 0)
+                .map(v => `"${v}"`)
+                .join(' ');
+        }
+
+        // Generate CLI Config (skip deleted rows) -> writes to editable textarea
+        document.getElementById('generateCliBtn').addEventListener('click', () => {
+            const rows = document.querySelectorAll('#policyTable tbody tr');
+            let cliConfig = 'config firewall policy\n';
+            rows.forEach(row => {
+                if (row.classList.contains('row-removed')) return; // Skip deleted/moved-from rows
+                const cells = row.querySelectorAll('td');
+                if (cells.length >= 9) {
+                    const id = cells[0].textContent.trim();
+                    const srcintf = cells[1].textContent.trim();
+                    const dstintf = cells[2].textContent.trim();
+                    const action = cells[3].textContent.trim();
+                    const srcaddr = cells[4].textContent.trim();
+                    const dstaddr = cells[5].textContent.trim();
+                    const service = cells[6].textContent.trim();
+                    const comments = cells[7].textContent.trim();
+
+                    if (id) {
+                        cliConfig += `    edit ${id}\n`;
+                        if (srcintf) cliConfig += `        set srcintf "${srcintf}"\n`;
+                        if (dstintf) cliConfig += `        set dstintf "${dstintf}"\n`;
+                        if (action) cliConfig += `        set action "${action}"\n`;
+                        if (srcaddr) cliConfig += `        set srcaddr ${quoteEach(srcaddr)}\n`;
+                        if (dstaddr) cliConfig += `        set dstaddr ${quoteEach(dstaddr)}\n`;
+                        cliConfig += `        set schedule "always"\n`;
+                        if (service) cliConfig += `        set service ${quoteEach(service)}\n`;
+                        if (comments) cliConfig += `        set comments "${comments}"\n`;
+                        cliConfig += `    next\n`;
+                    }
+                }
+            });
+            cliConfig += 'end';
+            const cliOutput = document.getElementById('cliOutput');
+            if (cliOutput) cliOutput.value = cliConfig;
+        });
+
+        // ---- SIMPLE VALIDATION ----
+        function validateCliText(cliText) {
+            const errors = [];
+            const text = (cliText || '').trim();
+            if (!text) {
+                errors.push('CLI config is empty.');
+                return { valid: false, errors };
+            }
+
+            const lines = text.split(/\r?\n/);
+
+            // Check start and end
+            const firstNonEmpty = lines.find(l => l.trim().length > 0) || '';
+            const lastNonEmpty = [...lines].reverse().find(l => l.trim().length > 0) || '';
+            if (!/^config\s+firewall\s+policy$/i.test(firstNonEmpty.trim())) {
+                errors.push('Config must start with: config firewall policy');
+            }
+            if (!/^end$/i.test(lastNonEmpty.trim())) {
+                errors.push('Config must end with: end');
+            }
+
+            // Check blocks: edit <id> ... next
+            let inBlock = false;
+            let currentId = null;
+            let lineNum = 0;
+            lines.forEach(line => {
+                lineNum++;
+                const trimmed = line.trim();
+
+                const editMatch = /^edit\s+(\S+)/i.exec(trimmed);
+                if (editMatch) {
+                    if (inBlock) {
+                        errors.push(`Line ${lineNum}: Found 'edit' inside an open block. Missing 'next' for previous block (ID: ${currentId}).`);
+                    }
+                    inBlock = true;
+                    currentId = editMatch[1];
+                    if (!/^\d+$/.test(currentId)) {
+                        errors.push(`Line ${lineNum}: Policy ID '${currentId}' should be numeric.`);
+                    }
+                    return;
+                }
+
+                if (/^next$/i.test(trimmed)) {
+                    if (!inBlock) {
+                        errors.push(`Line ${lineNum}: 'next' found without a matching 'edit'.`);
+                    }
+                    inBlock = false;
+                    currentId = null;
+                    return;
+                }
+            });
+
+            if (inBlock) {
+                errors.push(`Missing 'next' for the last open block (ID: ${currentId}).`);
+            }
+
+            return { valid: errors.length === 0, errors };
+        }
+
+        // Validate button
+        document.getElementById('validateCliBtn').addEventListener('click', () => {
+            const cliOutput = document.getElementById('cliOutput');
+            const { valid, errors } = validateCliText(cliOutput ? cliOutput.value : '');
+            if (valid) {
+                alert('CLI validation passed ✅');
+            } else {
+                alert('Validation failed:\n\n' + errors.join('\n'));
+            }
+        });
+
+        // Copy CLI button
+        document.getElementById('copyCliBtn').addEventListener('click', async () => {
+            const cliOutput = document.getElementById('cliOutput');
+            const cliText = cliOutput ? cliOutput.value : '';
+            if (!cliText.trim()) {
+                alert('Nothing to copy. Generate or paste CLI first.');
+                return;
+            }
+            try {
+                if (navigator.clipboard && navigator.clipboard.writeText) {
+                    await navigator.clipboard.writeText(cliText);
+                } else {
+                    // Fallback for older browsers
+                    cliOutput.select();
+                    document.execCommand('copy');
+                }
+                alert('CLI copied to clipboard ✅');
+            } catch (err) {
+                console.error(err);
+                alert('Failed to copy CLI to clipboard.');
+            }
+        });
+
+        // Download CLI Config (uses editable textarea content, requires validation)
+        document.getElementById('downloadCliBtn').addEventListener('click', () => {
+            const cliOutput = document.getElementById('cliOutput');
+            const cliText = cliOutput ? cliOutput.value : '';
+            const { valid, errors } = validateCliText(cliText);
+            if (!valid) {
+                alert('Please fix validation errors before downloading:\n\n' + errors.join('\n'));
+                return;
+            }
+            const blob = new Blob([cliText], { type: 'text/plain' });
+            const url = URL.createObjectURL(blob);
+            const a = document.createElement('a');
+            a.href = url;
+            a.download = 'fortigate_config.txt';
+            a.click();
+            URL.revokeObjectURL(url);
+        });
+
+        // Download Deleted Rules
+        document.getElementById('downloadDeletedBtn').addEventListener('click', () => {
+            if (deletedPolicies.length === 0) {
+                alert('No deleted rules to export.');
+                return;
+            }
+            let cliConfig = 'config firewall policy\n';
+            deletedPolicies.forEach(policy => {
+                cliConfig += `    edit ${policy.id}\n`;
+                if (policy.srcintf) cliConfig += `        set srcintf "${policy.srcintf}"\n`;
+                if (policy.dstintf) cliConfig += `        set dstintf "${policy.dstintf}"\n`;
+                if (policy.action) cliConfig += `        set action "${policy.action}"\n`;
+                if (policy.srcaddr) cliConfig += `        set srcaddr ${quoteEach(policy.srcaddr)}\n`;
+                if (policy.dstaddr) cliConfig += `        set dstaddr ${quoteEach(policy.dstaddr)}\n`;
+                cliConfig += `        set schedule "always"\n`;
+                if (policy.service) cliConfig += `        set service ${quoteEach(policy.service)}\n`;
+                if (policy.comments) cliConfig += `        set comments "${policy.comments}"\n`;
+                cliConfig += `    next\n`;
+            });
+            cliConfig += 'end';
+
+            const blob = new Blob([cliConfig], { type: 'text/plain' });
+            const url = URL.createObjectURL(blob);
+            const a = document.createElement('a');
+            a.href = url;
+            a.download = 'deleted_fortigate_rules.txt';
+            a.click();
+            URL.revokeObjectURL(url);
+        });
+
+        // Save changes to Django via AJAX (skip deleted rows; optional validation gate)
+        document.getElementById('saveToServerBtn').addEventListener('click', () => {
+            // Optional validation before saving:
+            const cliOutput = document.getElementById('cliOutput');
+            const cliText = cliOutput ? cliOutput.value : '';
+            const { valid, errors } = validateCliText(cliText);
+            if (!valid) {
+                alert('Please fix validation errors before saving to server:\n\n' + errors.join('\n'));
+                return;
+            }
+
+            const rows = document.querySelectorAll('#policyTable tbody tr');
+            const policies = [];
+            rows.forEach(row => {
+                if (row.classList.contains('row-removed')) return; // Skip deleted/moved-from rows
+                const cells = row.querySelectorAll('td');
+                if (cells.length >= 9) {
+                    policies.push({
+                        id: cells[0].textContent.trim(),
+                        srcintf: cells[1].textContent.trim(),
+                        dstintf: cells[2].textContent.trim(),
+                        action: cells[3].textContent.trim(),
+                        srcaddr: cells[4].textContent.trim(),
+                        dstaddr: cells[5].textContent.trim(),
+                        service: cells[6].textContent.trim(),
+                        comments: cells[7].textContent.trim()
+                    });
+                }
+            });
+
+            fetch('/save-policies/', {
+                method: 'POST',
+                headers: {
+                    'Content-Type': 'application/json',
+                    'X-CSRFToken': '{{ csrf_token }}'
+                },
+                body: JSON.stringify({ policies: policies })
+            })
+            .then(response => response.json())
+            .then(data => alert('Policies saved successfully!'))
+            .catch(error => console.error('Error:', error));
+        });
+    </script>
+</body>
+</html>

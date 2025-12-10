@@ -1,0 +1,620 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <title>Fortigate Policy & NAT Parser — Dark Mode</title>
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <style>
+    :root { --font-size: 13px; --cell-pad: 6px; --bg: #0f1115; --surface: #14171f; --surface-2: #1a1f29; --text: #e8eaed; --text-dim: #b8bec7; --border: #2a3040; --border-strong: #394258; --primary: #7c4dff; --success:#28a745; --danger:#dc3545; --input-bg:#0d1117; --input-border:#2a3040; --input-focus:#7c4dff55; --btn-bg:#1f2430; --btn-bg-hover:#242a38; --btn-text:var(--text); --row-added:#16331f; --row-removed:#2a1316; --row-edited:#2f2a15; }
+    @media (prefers-color-scheme: dark) { :root { color-scheme: dark; } }
+    html, body { height:100%; background:var(--bg); color:var(--text); font-family:system-ui,-apple-system,Segoe UI,Roboto,Ubuntu,Cantarell,"Helvetica Neue",Arial,"Noto Sans"; font-size:var(--font-size); }
+    body { margin:16px; }
+    .tabs { display:flex; gap:8px; border-bottom:1px solid var(--border); margin-bottom:12px; }
+    .tab-btn { border:1px solid var(--border); background:var(--btn-bg); color:var(--text); padding:8px 12px; cursor:pointer; border-top-left-radius:6px; border-top-right-radius:6px; }
+    .tab-btn:hover { background:var(--btn-bg-hover); }
+    .tab-btn.active { background:var(--surface); border-color:var(--border-strong); border-bottom-color:var(--surface); }
+    .tab-content { display:none; padding-top:8px; }
+    .tab-content.active { display:block; }
+    .table-container { height:420px; overflow-y:auto; overflow-x:hidden; border:1px solid var(--border); margin-top:12px; background:var(--surface); border-radius:8px; }
+    table { width:100%; border-collapse:collapse; table-layout:fixed; color:var(--text); }
+    th, td { border:1px solid var(--border); padding:var(--cell-pad); text-align:left; word-break:break-word; }
+    th { background:var(--surface-2); position:sticky; top:0; z-index:2; }
+    tr:hover td { background:#171b24; }
+    .controls { margin-top:10px; display:flex; flex-wrap:wrap; gap:8px; }
+    button { cursor:pointer; background:var(--btn-bg); color:var(--btn-text); border:1px solid var(--border); padding:6px 12px; border-radius:6px; }
+    button:hover { background:var(--btn-bg-hover); }
+    .deleteBtn { background: var(--danger); border-color: var(--danger); }
+    .undoBtn { background: var(--success); border-color: var(--success); }
+    .cliOutput, textarea { width:100%; min-height:220px; font-family:ui-monospace,SFMono-Regular,Menlo,Monaco,Consolas,"Liberation Mono"; font-size:var(--font-size); line-height:1.4; box-sizing:border-box; margin-top:10px; padding:10px; border:1px solid var(--input-border); border-radius:8px; background:var(--input-bg); color:var(--text); resize:vertical; white-space:pre-wrap; outline:none; }
+
+    /* Policies with Log + UTM columns */
+    #policyTable th:nth-child(1),  #policyTable td:nth-child(1)  { width:5%; }
+    #policyTable th:nth-child(2),  #policyTable td:nth-child(2)  { width:10%; }
+    #policyTable th:nth-child(3),  #policyTable td:nth-child(3)  { width:9%; }
+    #policyTable th:nth-child(4),  #policyTable td:nth-child(4)  { width:9%; }
+    #policyTable th:nth-child(5),  #policyTable td:nth-child(5)  { width:7%; }
+    #policyTable th:nth-child(6),  #policyTable td:nth-child(6)  { width:12%; }
+    #policyTable th:nth-child(7),  #policyTable td:nth-child(7)  { width:12%; }
+    #policyTable th:nth-child(8),  #policyTable td:nth-child(8)  { width:8%; }
+    #policyTable th:nth-child(9),  #policyTable td:nth-child(9)  { width:8%; }
+    #policyTable th:nth-child(10), #policyTable td:nth-child(10) { width:6%; text-align:center; }
+    #policyTable th:nth-child(11), #policyTable td:nth-child(11) { width:6%; text-align:center; }
+    #policyTable th:nth-child(12), #policyTable td:nth-child(12) { width:12%; }
+    #policyTable th:nth-child(13), #policyTable td:nth-child(13) { width:6%; }
+
+    /* Center the native checkbox in the cell */
+    .logtraffic-cell, .utm-cell { padding:0; text-align:center; }
+    .cell-checkbox { width:18px; height:18px; accent-color: var(--primary); cursor:pointer; }
+
+    .row-drag-handle { display:inline-block; cursor:grab; user-select:none; padding:0 4px; color:#9aa0a6; }
+    .row-drag-handle:active { cursor:grabbing; }
+
+    /* Row removal visuals */
+    tr.row-removed > td { background: #2a1316 !important; border-color: var(--danger) !important; }
+    tr.row-removed:hover > td { background: #2a1316 !important; }
+  </style>
+</head>
+<body>
+  <h1>Fortigate CLI Parser</h1>
+  <div class="tabs">
+    <button class="tab-btn active" data-tab="policiesTab">Policies</button>
+    <button class="tab-btn" data-tab="natTab">NAT (Central SNAT + DNAT/VIP)</button>
+  </div>
+
+  <!-- Policies Tab -->
+  <div id="policiesTab" class="tab-content active">
+    <div class="form-row">
+      <label class="label" for="policyCliInput">Paste 'config firewall policy' CLI:</label>
+      <textarea id="policyCliInput" placeholder="Example:
+config firewall policy
+    edit 3313
+        set uuid 1ee08114-c644-51f0-25f2-880da21df488
+        set srcintf \"inside\"
+        set dstintf \"outside\"
+        set action accept
+        set srcaddr \"host-10.138.16.140\"
+        set dstaddr \"all\"
+        set schedule \"always\"
+        set service \"tcp/udp-1400-1410\"
+        set utm-status enable
+        set logtraffic all
+    next
+end"></textarea>
+    </div>
+
+    <div class="controls">
+      <button type="button" id="policyParseClientBtn">Parse Policies</button>
+      <button type="button" id="policyResetBtn">Reset Table</button>
+      <button type="button" id="policyGenerateCliBtn">Generate CLI Config</button>
+      <button type="button" id="policyValidateCliBtn">Validate CLI</button>
+      <button type="button" id="policyCopyCliBtn">Copy CLI</button>
+      <button type="button" id="policyDownloadCliBtn">Download CLI Config</button>
+      <button type="button" id="policyUndoLastChangeBtn">Undo Last Change</button>
+      <button type="button" id="policySaveToServerBtn">Save Policies to Server</button>
+      <button type="button" id="policyDownloadDeletedBtn">Download Deleted Rules</button>
+    </div>
+
+    <div class="table-container">
+      <table id="policyTable">
+        <thead>
+          <tr>
+            <th>ID</th><th>Name</th><th>Source Interface</th><th>Destination Interface</th><th>Action</th><th>Source Address</th><th>Destination Address</th><th>Service</th><th>SSL/SSH Profile</th><th>Log</th><th>UTM</th><th>Comments</th><th>Actions</th>
+          </tr>
+        </thead>
+        <tbody></tbody>
+      </table>
+    </div>
+
+    <h3>Generated CLI Config (editable):</h3>
+    <textarea id="policyCliOutput" class="cliOutput"></textarea>
+  </div>
+
+  <!-- NAT Tab -->
+  <div id="natTab" class="tab-content">
+    <div class="form-row">
+      <label class="label" for="natCliInput">Paste NAT CLI (central-snat-map or vip):</label>
+      <textarea id="natCliInput" name="nat_cli_text" placeholder="Examples:
+config firewall central-snat-map
+  edit 1
+    set srcintf \"inside\"
+    set dstintf \"outside\"
+    set orig-addr \"net-10.0.0.0-16\" \"net-10.10.0.0-16\"
+    set dst-addr \"all\"
+    set nat-ippool \"host-203.0.113.5\"
+  next
+end
+
+config firewall vip
+  edit \"203.0.113.9-to-10.30.2.1\"
+    set extintf \"any\"
+    set extip 203.0.113.9
+    set mappedip \"10.30.2.1\"
+    set portforward enable
+    set protocol tcp
+    set extport 443
+    set mappedport 443
+    set comment \"HTTPS\"
+  next
+end"></textarea>
+    </div>
+    <div class="controls">
+      <button type="button" id="parseNatBtn">Parse NAT</button>
+      <button type="button" id="exportExcelBtn">Export Excel (SNAT + DNAT)</button>
+    </div>
+
+    <h2>Central SNAT Map (config firewall central-snat-map)</h2>
+    <div class="controls">
+      <button type="button" id="csnatAddRowBtn">Add Row</button>
+      <button type="button" id="csnatResetBtn">Reset Table</button>
+      <button type="button" id="csnatUndoLastChangeBtn">Undo Last Change</button>
+      <button type="button" id="csnatSaveToServerBtn">Save Central SNAT to Server</button>
+    </div>
+    <div class="table-container">
+      <table id="centralSnatTable">
+        <thead>
+          <tr>
+            <th>Policy ID</th><th>Src Interfaces</th><th>Dst Interfaces</th><th>Orig Addr (names)</th><th>Dst Addr (names)</th><th>Protocol</th><th>Orig Port</th><th>NAT Port</th><th>NAT IPPool(s)</th><th>NAT</th><th>Comments</th><th>Actions</th>
+          </tr>
+        </thead>
+        <tbody></tbody>
+      </table>
+    </div>
+
+    <h2>Central DNAT & Virtual IPs (config firewall vip)</h2>
+    <div class="controls">
+      <button type="button" id="vipAddRowBtn">Add VIP Row</button>
+      <button type="button" id="vipResetBtn">Reset VIP Table</button>
+      <button type="button" id="vipUndoLastChangeBtn">Undo Last Change</button>
+      <button type="button" id="vipSaveToServerBtn">Save VIPs to Server</button>
+    </div>
+    <div class="table-container">
+      <table id="vipTable">
+        <thead>
+          <tr>
+            <th>Name/ID</th><th>Ext Interface</th><th>External IP</th><th>Mapped IP</th><th>External Port</th><th>Mapped Port</th><th>Protocol</th><th>Comments</th><th>Actions</th>
+          </tr>
+        </thead>
+        <tbody></tbody>
+      </table>
+    </div>
+
+    <h2>UDT Bulk Mappings (Paste 3 Columns)</h2>
+    <div class="controls">
+      <button type="button" id="udtParseBtn">Parse 3‑Column Paste</button>
+      <button type="button" id="udtAddRowBtn">Add UDT Row</button>
+      <button type="button" id="udtResetBtn">Reset UDT Table</button>
+      <button type="button" id="udtGenerateCliBtn">Generate UDT CLI (IPPool + Central SNAT + VIP)</button>
+      <button type="button" id="udtValidateCliBtn">Validate UDT CLI</button>
+      <button type="button" id="udtCopyCliBtn">Copy UDT CLI</button>
+      <button type="button" id="udtDownloadCliBtn">Download UDT CLI</button>
+      <button type="button" id="udtSaveBtn">Save UDT Rows to Server</button>
+    </div>
+    <textarea id="udtPasteArea" class="cliOutput" placeholder="Paste 3 columns here (tab/comma/pipe separated):&#10;203.0.113.5   net-10.0.0.0-16   SNAT&#10;203.0.113.5   \"net-10.10.0.0-16\" SNAT&#10;203.0.113.9   10.30.2.1         DNAT"></textarea>
+    <div class="table-container">
+      <table id="udtTable">
+        <thead>
+          <tr>
+            <th>UDT Publics (Public IP)</th><th>Mapped Private</th><th>SNAT/DNAT</th><th>Actions</th>
+          </tr>
+        </thead>
+        <tbody></tbody>
+      </table>
+    </div>
+    <h3>UDT CLI (editable):</h3>
+    <textarea id="udtCliOutput" class="cliOutput"></textarea>
+  </div>
+
+  <!-- Tabs wiring -->
+  <script>
+    document.addEventListener('DOMContentLoaded', () => {
+      const tabButtons = document.querySelectorAll('.tab-btn');
+      const tabContents = document.querySelectorAll('.tab-content');
+      tabButtons.forEach(btn => {
+        btn.addEventListener('click', () => {
+          const targetId = btn.dataset.tab;
+          tabButtons.forEach(b => b.classList.remove('active'));
+          tabContents.forEach(c => c.classList.remove('active'));
+          btn.classList.add('active');
+          document.getElementById(targetId).classList.add('active');
+        });
+      });
+    });
+  </script>
+
+  <!-- Helpers -->
+  <script>
+    if (!Array.prototype.findLastIndex) {
+      Object.defineProperty(Array.prototype, 'findLastIndex', {
+        value: function(predicate, thisArg) {
+          for (let i = this.length - 1; i >= 0; i--) { if (predicate.call(thisArg, this[i], i, this)) return i; }
+          return -1;
+        }, configurable: true, writable: true
+      });
+    }
+    function getCookie(name) { const value = `; ${document.cookie}`; const parts = value.split(`; ${name}=`); if (parts.length === 2) return parts.pop().split(';').shift(); return null; }
+    const csrftoken = getCookie('csrftoken');
+    function escapeForti(str) { return (str || '').replace(/\\/g, '\\').replace(/"/g, '\"'); }
+    function quoteEach(value) { const names = splitNames(value); const filtered = (names || []).filter(v => v && v.trim().length > 0); return filtered.map(v => `"${escapeForti(v.trim())}"`).join(' '); }
+    function hasListValues(listStr) { const names = splitNames(listStr); return (names || []).some(v => v && v.trim().length > 0); }
+    function sanitizeCellText(text) { return (text || '').replace(/[\u0000-\u001F\u007F]/g, '').trim(); }
+    function splitNames(listStr) { const s = (listStr || '').trim(); if (!s) return []; const quoted = s.match(/"([^"]+)"/g); if (quoted) return quoted.map(x => x.replace(/"/g, '')); return s.split(/\s+/).filter(Boolean); }
+    function getSections(text, headerRegex) {
+      const out = []; const lines = (text || '').split(/\r?\n/); let inSection = false; let current = [];
+      for (let i=0;i<lines.length;i++) { const line = lines[i]; if (headerRegex.test(line)) { if (inSection && current.length) out.push(current.join('\n')); inSection = true; current = [line]; continue; }
+        if (inSection) { current.push(line); if (/^\s*end\s*$/i.test(line)) { out.push(current.join('\n')); inSection = false; current = []; } }
+      }
+      if (inSection && current.length) out.push(current.join('\n')); return out;
+    }
+    function fortiQuotePlain(value) { const v = (value || '').replace(/["\\]/g, '').trim(); return `"${v}"`; }
+    function fortiQuoteList(valuesArray) { return (valuesArray || []).map(v => fortiQuotePlain(v)).join(' '); }
+    function enforcePlainTextPaste(containerSelector) {
+      const container = document.querySelector(containerSelector); if (!container) return;
+      container.addEventListener('paste', (e) => {
+        const active = document.activeElement; if (!active || active.tagName !== 'TD' || !active.isContentEditable) return;
+        e.preventDefault(); const text = (e.clipboardData || window.clipboardData).getData('text'); const sanitized = sanitizeCellText(text); document.execCommand('insertText', false, sanitized);
+      });
+    }
+    document.addEventListener('DOMContentLoaded', () => {
+      enforcePlainTextPaste('#policiesTab'); enforcePlainTextPaste('#natTab');
+    });
+  </script>
+
+  <!-- POLICIES: Parser + module (native checkboxes for Log + UTM) -->
+  <script>
+    function parsePoliciesClient(cliText) {
+      const results = []; const sections = getSections(cliText, /^\s*config\s+firewall\s+policy\s*$/i);
+      sections.forEach(sec => {
+        const lines = sec.split(/\r?\n/); let inBlock = false; let blockLines = []; let currentId = '';
+        const flushBlock = () => {
+          if (!blockLines.length || !currentId) return; const blockText = blockLines.join('\n');
+          const getSetRaw = (key) => { const r = new RegExp(`^\\s*set\\s+${key}\\s+(.+)$`, 'mi').exec(blockText); return r ? r[1].trim() : ''; };
+          const getSetStr = (key) => (getSetRaw(key) || '').replace(/^"|"$/g, '');
+          results.push({ id: currentId, name: getSetStr('name'), srcintf: getSetRaw('srcintf'), dstintf: getSetRaw('dstintf'), action: getSetStr('action'), srcaddr: getSetRaw('srcaddr'), dstaddr: getSetRaw('dstaddr'), service: getSetRaw('service'), sslssh: getSetStr('ssl-ssh-profile'), schedule: getSetStr('schedule'), logtraffic: (getSetStr('logtraffic') || ''), utm: (/\bset\s+utm-status\s+enable\b/i.test(blockText)), comments: (getSetStr('comments') || getSetStr('comment')) });
+        };
+        for (let i=0;i<lines.length;i++) { const ln = lines[i]; const editMatch = /^\s*edit\s+("?[^\"]+"|\S+)\s*$/i.exec(ln); if (editMatch) { if (inBlock) flushBlock(); inBlock = true; blockLines = []; currentId = editMatch[1].replace(/^"|"$/g,'').trim(); continue; } if (/^\s*next\s*$/i.test(ln)) { flushBlock(); inBlock = false; blockLines = []; currentId = ''; continue; } if (inBlock) blockLines.push(ln); } if (inBlock) flushBlock(); }); return results; }
+
+    function renderPoliciesClient(rows) {
+      const tbody = document.querySelector('#policyTable tbody'); if (!tbody) return; tbody.innerHTML = '';
+      const makeEditable = (text='') => `<td contenteditable="true" data-plaintext="1" draggable="true">${text}</td>`;
+
+      if (!rows.length) {
+        const tr = document.createElement('tr');
+        tr.innerHTML = `
+          <td draggable="true"><span class="row-drag-handle">≡</span></td>
+          ${makeEditable('')}
+          ${makeEditable('')}
+          ${makeEditable('')}
+          ${makeEditable('')}
+          ${makeEditable('')}
+          ${makeEditable('')}
+          ${makeEditable('')}
+          ${makeEditable('')}
+          <td class="logtraffic-cell"><input type="checkbox" class="cell-checkbox" /></td>
+          <td class="utm-cell"><input type="checkbox" class="cell-checkbox" /></td>
+          ${makeEditable('')}
+          <td><button class="deleteBtn">Delete</button><button class="undoBtn">Undo</button></td>`;
+        tbody.appendChild(tr);
+        return;
+      }
+
+      rows.forEach(p => {
+        const tr = document.createElement('tr');
+        const logChecked = !!(p.logtraffic && !/^disable$/i.test(p.logtraffic));
+        const utmChecked = !!p.utm;
+        tr.dataset.logtraffic = (p.logtraffic || '').trim();
+        tr.dataset.utm = utmChecked ? 'enable' : '';
+        tr.innerHTML = `
+          <td draggable="true"><span class="row-drag-handle">≡</span> ${(p.id||'')}</td>
+          ${makeEditable(p.name||'')}
+          ${makeEditable(p.srcintf||'')}
+          ${makeEditable(p.dstintf||'')}
+          ${makeEditable(p.action||'')}
+          ${makeEditable(p.srcaddr||'')}
+          ${makeEditable(p.dstaddr||'')}
+          ${makeEditable(p.service||'')}
+          ${makeEditable(p.sslssh||'')}
+          <td class="logtraffic-cell"><input type="checkbox" class="cell-checkbox" ${logChecked?'checked':''} /></td>
+          <td class="utm-cell"><input type="checkbox" class="cell-checkbox" ${utmChecked?'checked':''} /></td>
+          ${makeEditable(p.comments||'')}
+          <td><button class="deleteBtn">Delete</button><button class="undoBtn">Undo</button></td>`;
+        tbody.appendChild(tr);
+      });
+    }
+
+    const policyModule = (() => {
+      let draggedCell = null, draggedRow = null, dragMode = null, draggedText = '';
+      let originalTableHTML = '', changeHistory = [];
+      const LIST_COLS = new Set([2,3,5,6,7]);
+      const stripIcon = s => (s||'').replace(/[≡]/g,'').trim();
+      const getText = td => stripIcon(td.textContent||'');
+
+      function recordChange(row, prev) { changeHistory.push({ row, previousState: prev }); }
+
+      function init() {
+        const tbody = document.querySelector('#policyTable tbody'); if (!tbody) return;
+        originalTableHTML = tbody.innerHTML;
+        enableEvents(); enableAutoScroll();
+        document.getElementById('policyResetBtn')?.addEventListener('click', onReset);
+        document.getElementById('policyGenerateCliBtn')?.addEventListener('click', onGenerateCli);
+        document.getElementById('policyValidateCliBtn')?.addEventListener('click', onValidateCli);
+        document.getElementById('policyCopyCliBtn')?.addEventListener('click', onCopyCli);
+        document.getElementById('policyDownloadCliBtn')?.addEventListener('click', onDownloadCli);
+        document.getElementById('policyUndoLastChangeBtn')?.addEventListener('click', onUndo);
+        document.getElementById('policySaveToServerBtn')?.addEventListener('click', onSave);
+        document.getElementById('policyDownloadDeletedBtn')?.addEventListener('click', onDownloadDeleted);
+        document.getElementById('policyParseClientBtn')?.addEventListener('click', () => {
+          const cliText = document.getElementById('policyCliInput')?.value || '';
+          const rows = parsePoliciesClient(cliText);
+          renderPoliciesClient(rows);
+          const tb = document.querySelector('#policyTable tbody'); originalTableHTML = tb.innerHTML;
+        });
+      }
+
+      function enableEvents() {
+        const table = document.getElementById('policyTable'); if (!table) return;
+        const tbody = table.querySelector('tbody');
+
+        table.addEventListener('click', (e) => {
+          if (e.target.matches('.deleteBtn')) { const row=e.target.closest('tr'); recordChange(row,row.innerHTML); row.classList.add('row-removed'); }
+          if (e.target.matches('.undoBtn')) { const row=e.target.closest('tr'); const i=changeHistory.findLastIndex(h=>h.row===row); if(i>=0){ const snap=changeHistory.splice(i,1)[0]; row.innerHTML=snap.previousState; } row.classList.remove('row-removed','row-added','row-edited'); }
+        });
+        table.addEventListener('focusin', (e) => { if (e.target.matches('td[contenteditable]')) { const row=e.target.closest('tr'); row.dataset.prev=row.innerHTML; } });
+        table.addEventListener('input', (e) => { if (e.target.matches('td[contenteditable]')) { const row=e.target.closest('tr'); const prev=row.dataset.prev||row.innerHTML; recordChange(row,prev); row.classList.add('row-edited'); } });
+
+        // Row drag via handle
+        table.addEventListener('dragstart', (e) => {
+          if (e.target.classList.contains('row-drag-handle')) {
+            dragMode='row'; draggedRow=e.target.closest('tr'); e.dataTransfer.effectAllowed='move'; recordChange(tbody, tbody.innerHTML);
+            return;
+          }
+          if (e.target.matches('td[contenteditable]')) {
+            dragMode='cell'; draggedCell=e.target; draggedText=getText(draggedCell);
+            if (draggedText) { e.dataTransfer.setData('text/plain', draggedText); e.dataTransfer.effectAllowed='copyMove'; }
+            else { e.preventDefault(); dragMode=null; draggedCell=null; }
+          }
+        });
+        table.addEventListener('dragend', () => { dragMode=null; draggedRow=null; draggedCell=null; draggedText=''; });
+        table.addEventListener('dragover', (e) => {
+          if (!dragMode) return; e.preventDefault();
+          if (dragMode==='row') { const target=e.target.closest('tr'); if (!target||target===draggedRow) return; target.classList.add('row-edited'); }
+          else if (dragMode==='cell') { const td=e.target.closest('td'); if(!td||!draggedText) return; const col=Array.from(td.parentElement.children).indexOf(td); const allow=LIST_COLS.has(col) || e.altKey; if (allow) e.dataTransfer.dropEffect=e.shiftKey?'move':'copy'; }
+        });
+        table.addEventListener('dragleave', (e) => { const tr=e.target.closest('tr'); if(tr) tr.classList.remove('row-edited'); });
+        table.addEventListener('drop', (e) => {
+          if (!dragMode) return;
+          if (dragMode==='row') {
+            e.preventDefault(); const target=e.target.closest('tr'); if(!target||target===draggedRow) return; target.classList.remove('row-edited');
+            const before = e.clientY < target.getBoundingClientRect().top + target.offsetHeight/2;
+            if (before) tbody.insertBefore(draggedRow, target); else tbody.insertBefore(draggedRow, target.nextSibling);
+            draggedRow.classList.add('row-added');
+          } else if (dragMode==='cell') {
+            const td=e.target.closest('td'); if(!td||!draggedCell||!draggedText) return; e.preventDefault();
+            const row=td.closest('tr'); recordChange(row,row.innerHTML);
+            const col=Array.from(td.parentElement.children).indexOf(td);
+            const allowAppend=LIST_COLS.has(col);
+            const current=getText(td);
+            if (e.altKey) {
+              td.textContent = draggedText;
+            } else {
+              if (!allowAppend) return;
+              const tokens=current?current.split(/\s+/):[];
+              if (!tokens.includes(draggedText)) tokens.push(draggedText);
+              td.textContent = tokens.join(' ');
+            }
+
+            const sourceRow = draggedCell.closest('tr');
+            if (sourceRow) { sourceRow.classList.add('row-removed'); sourceRow.classList.add('row-edited'); }
+
+            if (e.shiftKey && draggedCell) {
+              const src=getText(draggedCell); const arr=src?src.split(/\s+/):[]; const i=arr.indexOf(draggedText); if(i>=0){ arr.splice(i,1); }
+              draggedCell.textContent = arr.join(' ');
+            }
+
+            row.classList.add('row-added');
+          }
+          dragMode=null; draggedRow=null; draggedCell=null; draggedText='';
+        });
+      }
+
+      function enableAutoScroll() {
+        const container=document.querySelector('#policiesTab .table-container'); if(!container) return; const EDGE=60, STEP=30;
+        document.addEventListener('dragover',(e)=>{ const r=container.getBoundingClientRect(); const y=e.clientY; if(y<r.top+EDGE){ container.scrollTop=Math.max(0,container.scrollTop-Math.ceil(((r.top+EDGE-y)/EDGE)*STEP)); } else if (y>r.bottom-EDGE){ container.scrollTop=Math.min(container.scrollHeight,container.scrollTop+Math.ceil(((y-(r.bottom-EDGE))/EDGE)*STEP)); } });
+      }
+
+      function buildPolicyBlock(obj) {
+        const { id, name, srcintf, dstintf, action, srcaddr, dstaddr, service, sslssh, schedule, logtraffic, utm, comments } = obj;
+        if (!id || !String(id).trim()) return '';
+        let out = `    edit ${String(id).trim()}\n`;
+        if (name && name.trim())    out += `        set name \"${escapeForti(name.trim())}\"\n`;
+        if (hasListValues(srcintf)) out += `        set srcintf ${quoteEach(srcintf)}\n`;
+        if (hasListValues(dstintf)) out += `        set dstintf ${quoteEach(dstintf)}\n`;
+        if (action && action.trim())  out += `        set action ${escapeForti(action.trim().toLowerCase())}\n`;
+        if (hasListValues(srcaddr)) out += `        set srcaddr ${quoteEach(srcaddr)}\n`;
+        if (hasListValues(dstaddr)) out += `        set dstaddr ${quoteEach(dstaddr)}\n`;
+        out += `        set schedule \"${escapeForti((schedule || 'always').trim())}\"\n`;
+        if (hasListValues(service)) out += `        set service ${quoteEach(service)}\n`;
+        if (sslssh && sslssh.trim())  out += `        set ssl-ssh-profile \"${escapeForti(sslssh.trim())}\"\n`;
+        if (utm) out += `        set utm-status enable\n`;
+        if ((logtraffic || '').trim()) out += `        set logtraffic ${escapeForti(logtraffic.trim())}\n`;
+        if (comments && comments.trim()) out += `        set comments \"${escapeForti(comments.trim())}\"\n`;
+        out += `    next\n`;
+        return out;
+      }
+
+      function validateCliText(cliText) {
+        const errors=[]; const text=(cliText||'').trim(); if(!text){ errors.push('CLI config is empty.'); return {valid:false, errors}; }
+        const lines=text.split(/\r?\n/); const first=lines.find(l=>l.trim().length>0)||''; const last=[...lines].reverse().find(l=>l.trim().length>0)||'';
+        if(!/^config\s+firewall\s+policy$/i.test(first.trim())) errors.push('Config must start with: config firewall policy');
+        if(!/^end$/i.test(last.trim())) errors.push('Config must end with: end');
+        let inBlock=false, currentId=null; lines.forEach((line,i)=>{ const t=line.trim(), ln=i+1; const m=/^edit\s+(\S+)/i.exec(t); if(m){ if(inBlock) errors.push(`Line ${ln}: 'edit' inside open block; missing 'next'.`); inBlock=true; currentId=m[1]; if(!/^\d+$/.test(currentId)) errors.push(`Line ${ln}: Policy ID '${currentId}' should be numeric.`); return; } if(/^next$/i.test(t)){ if(!inBlock) errors.push(`Line ${ln}: 'next' without 'edit'.`); inBlock=false; currentId=null; return; } }); if(inBlock) errors.push(`Missing 'next' for the last open block (ID: ${currentId}).`); return { valid: errors.length===0, errors };
+      }
+
+      function onReset(){ const tbody=document.querySelector('#policyTable tbody'); if(!tbody) return; tbody.innerHTML=originalTableHTML; document.querySelectorAll('#policyTable tr').forEach(r=>r.classList.remove('row-added','row-removed','row-edited')); document.getElementById('policyCliOutput').value=''; changeHistory=[]; }
+      function onGenerateCli(){ const rows=document.querySelectorAll('#policyTable tbody tr'); let txt='config firewall policy\n'; const blocks=[]; rows.forEach(row=>{ if(row.classList.contains('row-removed')) return; const c=row.querySelectorAll('td'); if(c.length>=13){ const logCb=c[9].querySelector('input[type="checkbox"]'); const utmCb=c[10].querySelector('input[type="checkbox"]'); let logtraffic=''; if(logCb&&logCb.checked) logtraffic='all'; else if((row.dataset.logtraffic||'').toLowerCase()==='disable') logtraffic='disable'; const utm=!!(utmCb&&utmCb.checked); const clean=s=>sanitizeCellText(stripIcon(s||'')); const obj={ id:clean(c[0].textContent), name:clean(c[1].textContent), srcintf:clean(c[2].textContent), dstintf:clean(c[3].textContent), action:clean(c[4].textContent), srcaddr:clean(c[5].textContent), dstaddr:clean(c[6].textContent), service:clean(c[7].textContent), sslssh:clean(c[8].textContent), schedule:'', logtraffic, utm, comments:clean(c[11].textContent) }; const block=buildPolicyBlock(obj); if(block && block.trim()) blocks.push(block.trimEnd()); } }); txt+=blocks.join('\n'); txt+='\nend'; document.getElementById('policyCliOutput').value=txt; }
+      function onValidateCli(){ const t=document.getElementById('policyCliOutput').value||''; const {valid,errors}=validateCliText(t); alert(valid?'CLI validation passed ✅':'Validation failed:\n\n'+errors.join('\n')); }
+      async function onCopyCli(){ const t=document.getElementById('policyCliOutput').value||''; if(!t.trim()) return alert('Nothing to copy.'); try{ if(navigator.clipboard?.writeText) await navigator.clipboard.writeText(t); else { const ta=document.getElementById('policyCliOutput'); ta.select(); document.execCommand('copy'); } alert('CLI copied to clipboard ✅'); }catch(e){ console.error(e); alert('Copy failed.'); } }
+      function onDownloadCli(){ const t=document.getElementById('policyCliOutput').value||''; const {valid,errors}=validateCliText(t); if(!valid) return alert('Please fix validation errors before downloading:\n\n'+errors.join('\n')); const blob=new Blob([t],{type:'text/plain'}); const url=URL.createObjectURL(blob); const a=document.createElement('a'); a.href=url; a.download='fortigate_policy.txt'; a.click(); URL.revokeObjectURL(url); }
+      function onUndo(){ if(!changeHistory.length) return alert('No changes to undo.'); const last=changeHistory.pop(); last.row.innerHTML=last.previousState; last.row.classList.remove('row-added','row-removed','row-edited'); }
+      function onSave(){ const rows=document.querySelectorAll('#policyTable tbody tr'); const policies=[]; rows.forEach(row=>{ if(row.classList.contains('row-removed')) return; const c=row.querySelectorAll('td'); if(c.length>=13){ const logCb=c[9].querySelector('input[type="checkbox"]'); const utmCb=c[10].querySelector('input[type="checkbox"]'); let logtraffic=''; if(logCb&&logCb.checked) logtraffic='all'; else if((row.dataset.logtraffic||'').toLowerCase()==='disable') logtraffic='disable'; const utm=!!(utmCb&&utmCb.checked); const clean=s=>sanitizeCellText(stripIcon(s||'')); policies.push({ id:clean(c[0].textContent), name:clean(c[1].textContent), srcintf:clean(c[2].textContent), dstintf:clean(c[3].textContent), action:clean(c[4].textContent), srcaddr:clean(c[5].textContent), dstaddr:clean(c[6].textContent), service:clean(c[7].textContent), sslssh:clean(c[8].textContent), schedule:'', logtraffic, utm, comments:clean(c[11].textContent) }); } }); fetch('/save-policies/',{ method:'POST', headers:{'Content-Type':'application/json','X-CSRFToken':csrftoken}, body:JSON.stringify({ policies }) }).then(r=>r.ok?r.json():Promise.reject(r)).then(()=>alert('Policies saved successfully!')).catch(err=>{ console.error('Error:',err); alert('Failed to save policies to server.'); }); }
+      function onDownloadDeleted(){ const rows=document.querySelectorAll('#policyTable tbody tr.row-removed'); const blocks=[]; rows.forEach(row=>{ const c=row.querySelectorAll('td'); if(c.length>=13){ const logCb=c[9].querySelector('input[type="checkbox"]'); const utmCb=c[10].querySelector('input[type="checkbox"]'); let logtraffic=''; if(logCb&&logCb.checked) logtraffic='all'; else if((row.dataset.logtraffic||'').toLowerCase()==='disable') logtraffic='disable'; const utm=!!(utmCb&&utmCb.checked); const stripIcon=s=>(s||'').replace(/[≡]/g,'').trim(); const clean=s=>sanitizeCellText(stripIcon(s||'')); const obj={ id:clean(c[0].textContent), name:clean(c[1].textContent), srcintf:clean(c[2].textContent), dstintf:clean(c[3].textContent), action:clean(c[4].textContent), srcaddr:clean(c[5].textContent), dstaddr:clean(c[6].textContent), service:clean(c[7].textContent), sslssh:clean(c[8].textContent), schedule:'', logtraffic, utm, comments:clean(c[11].textContent) }; const block=buildPolicyBlock(obj); if(block && block.trim()) blocks.push(block.trimEnd()); } }); if(!blocks.length) return alert('No deleted rules with details to download.'); let cli='config firewall policy\n'+blocks.join('\n')+'\nend\n'; const blob=new Blob([cli],{type:'text/plain'}); const url=URL.createObjectURL(blob); const a=document.createElement('a'); a.href=url; a.download='fortigate_policy_deleted_full.txt'; a.click(); URL.revokeObjectURL(url); }
+
+      return { init };
+    })();
+    document.addEventListener('DOMContentLoaded', () => { policyModule.init(); });
+  </script>
+
+  <!-- NAT + UDT scripts (same as before) -->
+  <script>
+    function getNatCliTextFromForm() { const ta=document.getElementById('natCliInput'); return ta?ta.value:''; }
+    function parseCentralSnatBlocks(cli) { const results=[]; const sections=getSections(cli,/^\s*config\s+firewall\s+central-snat-map\s*$/i); sections.forEach(sec=>{ const lines=sec.split(/\r?\n/); let inBlock=false; let blockLines=[]; let policyId=''; const flushBlock=()=>{ if(!blockLines.length||!policyId) return; const blockText=blockLines.join('\n'); const getSetRaw=(key)=>{ const r=new RegExp(`^\\s*set\\s+${key}\\s+(.+)$`,'mi').exec(blockText); return r?r[1].trim():''; }; const getSet=(key)=>getSetRaw(key).replace(/^"|"$/g,''); const srcintf=splitNames(getSetRaw('srcintf')); const dstintf=splitNames(getSetRaw('dstintf')); const origAddr=splitNames(getSetRaw('orig-addr')); const dstAddr=splitNames(getSetRaw('dst-addr')); const protocol=getSet('protocol')||'0'; const origPort=getSet('orig-port')||'0'; const natPort=getSet('nat-port')||'0'; const natIppool=splitNames(getSetRaw('nat-ippool')); const nat=getSet('nat')||'enable'; const commentsRaw=getSetRaw('comments')||getSetRaw('comment'); const comments=(commentsRaw||'').replace(/^"|"$/g,''); results.push({ policyid:policyId, srcintf:srcintf.join(' '), dstintf:dstintf.join(' '), orig_addr:origAddr.join(' '), dst_addr:dstAddr.join(' '), protocol, orig_port:origPort, nat_port:natPort, nat_ippool:natIppool.join(' '), nat, comments }); }; for(let i=0;i<lines.length;i++){ const ln=lines[i]; const editMatch=/^\s*edit\s+("?[^\"]+"|\d+)\s*$/i.exec(ln); if(editMatch){ if(inBlock) flushBlock(); inBlock=true; blockLines=[]; policyId=editMatch[1].replace(/^"|"$/g,'').trim(); continue; } if(/^\s*next\s*$/i.test(ln)){ flushBlock(); inBlock=false; blockLines=[]; policyId=''; continue; } if(inBlock) blockLines.push(ln); } if(inBlock) flushBlock(); }); return results; }
+    function parseVipBlocks(cli) { const results = []; const sections = getSections(cli, /^\s*config\s+firewall\s+vip\s*$/i); sections.forEach(sec => { const lines = sec.split(/\r?\n/); let inBlock = false; let blockLines = []; let nameId = ''; const flushBlock = () => { if (!blockLines.length || !nameId) return; const blockText = blockLines.join('\n'); const getSetRaw = (key) => { const r = new RegExp(`^\\s*set\\s+${key}\\s+(.+)$`, 'mi').exec(blockText); return r ? r[1].trim() : ''; }; const stripQuotes = (s) => (s || '').replace(/^"|"$/g, ''); const iface = stripQuotes(getSetRaw('extintf')); const extip = stripQuotes(getSetRaw('extip')); const mappedip = stripQuotes(getSetRaw('mappedip')); const portEnable = /\bset\s+portforward\s+enable\b/i.test(blockText); const extport = stripQuotes(getSetRaw('extport')); const mappedport = stripQuotes(getSetRaw('mappedport')); const protocol = stripQuotes(getSetRaw('protocol')); const comment = stripQuotes(getSetRaw('comment')); results.push({ name:nameId, interface:iface, external_ip:extip, mapped_ip:mappedip, external_port:portEnable?extport:'', mapped_port:portEnable?mappedport:'', protocol:portEnable?protocol:'', comments:comment }); }; for (let i=0;i<lines.length;i++){ const ln = lines[i]; const editMatch = /^\s*edit\s+("?[^\"]+"|\S+)\s*$/i.exec(ln); if (editMatch) { if (inBlock) flushBlock(); inBlock = true; blockLines = []; nameId = editMatch[1].replace(/^"|"$/g, '').trim(); continue; } if (/^\s*next\s*$/i.test(ln)) { flushBlock(); inBlock = false; blockLines = []; nameId = ''; continue; } if (inBlock) blockLines.push(ln); } if (inBlock) flushBlock(); }); return results; }
+    function renderCentralSnatRows(rows){ const tbody=document.querySelector('#centralSnatTable tbody'); if(!tbody) return; tbody.innerHTML=''; if(!rows.length){ const tr=document.createElement('tr'); tr.innerHTML=`<td contenteditable=plaintext-only></td><td contenteditable=plaintext-only></td><td contenteditable=plaintext-only></td><td contenteditable=plaintext-only></td><td contenteditable=plaintext-only></td><td contenteditable=plaintext-only>0</td><td contenteditable=plaintext-only>0</td><td contenteditable=plaintext-only>0</td><td contenteditable=plaintext-only></td><td contenteditable=plaintext-only>enable</td><td contenteditable=plaintext-only></td><td><button class=deleteBtn>Delete</button><button class=undoBtn>Undo</button></td>`; tbody.appendChild(tr); return; } rows.forEach(r=>{ const tr=document.createElement('tr'); tr.innerHTML=`<td contenteditable=plaintext-only>${r.policyid||''}</td><td contenteditable=plaintext-only>${r.srcintf||''}</td><td contenteditable=plaintext-only>${r.dstintf||''}</td><td contenteditable=plaintext-only>${r.orig_addr||''}</td><td contenteditable=plaintext-only>${r.dst_addr||''}</td><td contenteditable=plaintext-only>${r.protocol||'0'}</td><td contenteditable=plaintext-only>${r.orig_port||'0'}</td><td contenteditable=plaintext-only>${r.nat_port||'0'}</td><td contenteditable=plaintext-only>${r.nat_ippool||''}</td><td contenteditable=plaintext-only>${r.nat||'enable'}</td><td contenteditable=plaintext-only>${r.comments||''}</td><td><button class=deleteBtn>Delete</button><button class=undoBtn>Undo</button></td>`; tbody.appendChild(tr); }); }
+    function renderVipRows(rows){ const tbody=document.querySelector('#vipTable tbody'); if(!tbody) return; tbody.innerHTML=''; if(!rows.length){ const tr=document.createElement('tr'); tr.innerHTML=`<td contenteditable=plaintext-only></td><td contenteditable=plaintext-only></td><td contenteditable=plaintext-only></td><td contenteditable=plaintext-only></td><td contenteditable=plaintext-only></td><td contenteditable=plaintext-only></td><td contenteditable=plaintext-only></td><td contenteditable=plaintext-only></td><td><button class=deleteBtn>Delete</button><button class=undoBtn>Undo</button></td>`; tbody.appendChild(tr); return; } rows.forEach(v=>{ const tr=document.createElement('tr'); tr.innerHTML=`<td contenteditable=plaintext-only>${v.name||''}</td><td contenteditable=plaintext-only>${v.interface||''}</td><td contenteditable=plaintext-only>${v.external_ip||''}</td><td contenteditable=plaintext-only>${v.mapped_ip||''}</td><td contenteditable=plaintext-only>${v.external_port||''}</td><td contenteditable=plaintext-only>${v.mapped_port||''}</td><td contenteditable=plaintext-only>${v.protocol||''}</td><td contenteditable=plaintext-only>${v.comments||''}</td><td><button class=deleteBtn>Delete</button><button class=undoBtn>Undo</button></td>`; tbody.appendChild(tr); }); }
+    function parseNatClient(){ const cli=getNatCliTextFromForm(); const csnatRows=parseCentralSnatBlocks(cli); const vipRows=parseVipBlocks(cli); renderCentralSnatRows(csnatRows); renderVipRows(vipRows); }
+    document.addEventListener('DOMContentLoaded',()=>{ document.getElementById('parseNatBtn')?.addEventListener('click',(e)=>{ e.preventDefault(); parseNatClient(); }); });
+  </script>
+
+  <script>
+    function collectCentralSnat(){ const rows=[]; document.querySelectorAll('#centralSnatTable tbody tr').forEach(row=>{ if(row.classList.contains('row-removed')) return; const c=row.querySelectorAll('td'); if(c.length>=12){ rows.push({ policyid:sanitizeCellText(c[0].textContent), srcintf:sanitizeCellText(c[1].textContent), dstintf:sanitizeCellText(c[2].textContent), orig_addr:sanitizeCellText(c[3].textContent), dst_addr:sanitizeCellText(c[4].textContent), protocol:sanitizeCellText(c[5].textContent), orig_port:sanitizeCellText(c[6].textContent), nat_port:sanitizeCellText(c[7].textContent), nat_ippool:sanitizeCellText(c[8].textContent), nat:sanitizeCellText(c[9].textContent), comments:sanitizeCellText(c[10].textContent) }); } }); return rows; }
+    function collectVip(){ const rows=[]; document.querySelectorAll('#vipTable tbody tr').forEach(row=>{ if(row.classList.contains('row-removed')) return; const c=row.querySelectorAll('td'); if(c.length>=9){ rows.push({ name:sanitizeCellText(c[0].textContent), interface:sanitizeCellText(c[1].textContent), external_ip:sanitizeCellText(c[2].textContent), mapped_ip:sanitizeCellText(c[3].textContent), external_port:sanitizeCellText(c[4].textContent), mapped_port:sanitizeCellText(c[5].textContent), protocol:sanitizeCellText(c[6].textContent), comments:sanitizeCellText(c[7].textContent) }); } }); return rows; }
+    function collectUdt(){ const rows=[]; document.querySelectorAll('#udtTable tbody tr').forEach(row=>{ if(row.classList.contains('row-removed')) return; const c=row.querySelectorAll('td'); if(c.length>=4){ const clean=s=>(s||'').replace(/\\/g,'').trim(); rows.push({ public:clean(c[0].textContent), private:clean(c[1].textContent), type:clean(c[2].textContent).toUpperCase() }); } }); return rows; }
+    function groupCsnatByPool(csnatRows){ const grouped=new Map(); csnatRows.forEach(r=>{ const pools=splitNames(r.nat_ippool).filter(Boolean); const members=splitNames(r.orig_addr).filter(Boolean); if(!pools.length||!members.length) return; pools.forEach(pool=>{ if(!grouped.has(pool)) grouped.set(pool,new Set()); const set=grouped.get(pool); members.forEach(m=>set.add(m)); }); }); const result=[]; for(const [pool,set] of grouped.entries()){ result.push({ policyid:'', srcintf:'', dstintf:'', orig_addr:fortiQuoteList(Array.from(set)), dst_addr:'', protocol:'0', orig_port:'0', nat_port:'0', nat_ippool:pool, nat:'enable', comments:'' }); } return result; }
+    async function exportExcel(){
+      const csnatRaw = collectCentralSnat();
+      const vip = collectVip();
+      const udt = collectUdt();
+
+      const udtSnats = udt.filter(r => r.type==='SNAT');
+      const byPublic = new Map();
+      udtSnats.forEach(r => {
+        const pub=(r.public||'').trim(); if(!pub) return;
+        const privs=splitNames(r.private); if(!privs.length) return;
+        if(!byPublic.has(pub)) byPublic.set(pub,new Set());
+        privs.forEach(p => byPublic.get(pub).add(p));
+      });
+      const csnatFromUdt = [];
+      for (const [pub,set] of byPublic.entries()){
+        const poolName = `host-${(pub||'').trim()}`;
+        const origMembers = fortiQuoteList(Array.from(set));
+        csnatFromUdt.push({ policyid:'', srcintf:'inside', dstintf:'outside', orig_addr:origMembers, dst_addr:'all', protocol:'0', orig_port:'0', nat_port:'0', nat_ippool:poolName, nat:'enable', comments:'' });
+      }
+
+      function mergeCsnatByPool(aRows, bRows){
+        const byPool = new Map();
+        const addRow = (r) => {
+          const pool = (r.nat_ippool || '').trim(); if(!pool) return;
+          if(!byPool.has(pool)){
+            byPool.set(pool, {
+              policyid:'', srcintf:(r.srcintf||''), dstintf:(r.dstintf||''),
+              orig_addr:new Set(), dst_addr:(r.dst_addr||'all'),
+              protocol:(r.protocol||'0'), orig_port:(r.orig_port||'0'), nat_port:(r.nat_port||'0'),
+              nat_ippool:pool, nat:(r.nat||'enable'), comments:(r.comments||'')
+            });
+          }
+          const rec = byPool.get(pool);
+          splitNames(r.orig_addr).forEach(m => { if(m) rec.orig_addr.add(m); });
+          if((r.srcintf||'').trim()) rec.srcintf = r.srcintf;
+          if((r.dstintf||'').trim()) rec.dstintf = r.dstintf;
+        };
+        [...aRows, ...bRows].forEach(addRow);
+        return Array.from(byPool.values()).map(rec => ({
+          ...rec,
+          orig_addr: fortiQuoteList(Array.from(rec.orig_addr))
+        }));
+      }
+
+      function mergeVipByPublic(vipRows){
+        const map = new Map();
+        vipRows.forEach(v => {
+          const pub = (v.external_ip||'').trim(); if(!pub) return;
+          const priv = (v.mapped_ip||'').trim(); if(!priv) return;
+          if(!map.has(pub)){
+            map.set(pub, {
+              name: v.name || pub,
+              interface: v.interface || 'any',
+              external_ip: pub,
+              mapped_set: new Set(),
+              external_port: '',
+              mapped_port: '',
+              protocol: '',
+              comments: v.comments || ''
+            });
+          }
+          const rec = map.get(pub);
+          splitNames(priv).forEach(p => { if(p) rec.mapped_set.add(p); });
+          if((v.external_port||'').trim() && !rec.external_port) rec.external_port = v.external_port;
+          if((v.mapped_port||'').trim() && !rec.mapped_port) rec.mapped_port = v.mapped_port;
+          if((v.protocol||'').trim() && !rec.protocol) rec.protocol = v.protocol;
+        });
+        return Array.from(map.values()).map(rec => ({
+          name: rec.name,
+          interface: rec.interface,
+          external_ip: rec.external_ip,
+          mapped_ip: fortiQuoteList(Array.from(rec.mapped_set)),
+          external_port: rec.external_port,
+          mapped_port: rec.mapped_port,
+          protocol: rec.protocol,
+          comments: rec.comments
+        }));
+      }
+
+      const csnatGroupedFromTable = groupCsnatByPool(csnatRaw);
+      const csnat = mergeCsnatByPool(csnatFromUdt, csnatGroupedFromTable);
+      const vipMerged = mergeVipByPublic(vip);
+
+      try{
+        const resp = await fetch('/export-nat-excel/',{
+          method:'POST', headers:{'Content-Type':'application/json','X-CSRFToken':csrftoken},
+          body: JSON.stringify({ csnat: csnat, vip: vipMerged })
+        });
+        if(!resp.ok) throw new Error('Export failed');
+        const blob = await resp.blob();
+        const url = URL.createObjectURL(blob);
+        const a = document.createElement('a');
+        a.href = url; a.download = 'Fortigate_NAT.xlsx';
+        document.body.appendChild(a); a.click(); a.remove();
+        URL.revokeObjectURL(url);
+      }catch(e){ console.error(e); alert('Failed to export Excel.'); }
+    }
+    document.addEventListener('DOMContentLoaded',()=>{ document.getElementById('exportExcelBtn')?.addEventListener('click', exportExcel); });
+  </script>
+
+  <script>
+    const natModule = (() => {
+      const state = { csnat: { originalHTML: '', history: [] }, vip: { originalHTML: '', history: [] } };
+      function recordChange(kind, row, previousHTML) { state[kind].history.push({ row, previousHTML }); }
+      function getTBody(kind) { const id = kind==='csnat' ? '#centralSnatTable tbody' : '#vipTable tbody'; return document.querySelector(id); }
+      function init() { const csTbody=getTBody('csnat'); const vipTbody=getTBody('vip'); if(csTbody) state.csnat.originalHTML=csTbody.innerHTML; if(vipTbody) state.vip.originalHTML=vipTbody.innerHTML; wireButtons(); enableDelegatedEvents('csnat'); enableDelegatedEvents('vip'); }
+      function wireButtons(){ document.getElementById('csnatAddRowBtn')?.addEventListener('click',()=>addRow('csnat')); document.getElementById('csnatResetBtn')?.addEventListener('click',()=>reset('csnat')); document.getElementById('csnatUndoLastChangeBtn')?.addEventListener('click',()=>undo('csnat')); document.getElementById('csnatSaveToServerBtn')?.addEventListener('click',()=>save('csnat')); document.getElementById('vipAddRowBtn')?.addEventListener('click',()=>addRow('vip')); document.getElementById('vipResetBtn')?.addEventListener('click',()=>reset('vip')); document.getElementById('vipUndoLastChangeBtn')?.addEventListener('click',()=>undo('vip')); document.getElementById('vipSaveToServerBtn')?.addEventListener('click',()=>save('vip')); }
+      function enableDelegatedEvents(kind){ const tableId= kind==='csnat' ? 'centralSnatTable' : 'vipTable'; const table=document.getElementById(tableId); if(!table) return; table.addEventListener('click',(e)=>{ if(e.target.matches('.deleteBtn')){ const row=e.target.closest('tr'); recordChange(kind,row,row.innerHTML); row.classList.add('row-removed'); } if(e.target.matches('.undoBtn')){ const row=e.target.closest('tr'); const idx=state[kind].history.findLastIndex(h=>h.row===row); if(idx>=0){ const snap=state[kind].history.splice(idx,1)[0]; row.innerHTML=snap.previousHTML; } row.classList.remove('row-removed','row-added','row-edited'); } }); table.addEventListener('focusin',(e)=>{ if(e.target.matches('td[contenteditable]')){ const row=e.target.closest('tr'); row.dataset.prev=row.innerHTML; } }); table.addEventListener('input',(e)=>{ if(e.target.matches('td[contenteditable]')){ const row=e.target.closest('tr'); const prev=row.dataset.prev||row.innerHTML; recordChange(kind,row,prev); row.classList.add('row-edited'); } }); }
+      function addRow(kind){ const tbody=getTBody(kind); if(!tbody) return; const tr=document.createElement('tr'); if(kind==='csnat'){ tr.innerHTML=`<td contenteditable=plaintext-only></td><td contenteditable=plaintext-only></td><td contenteditable=plaintext-only></td><td contenteditable=plaintext-only></td><td contenteditable=plaintext-only></td><td contenteditable=plaintext-only>0</td><td contenteditable=plaintext-only>0</td><td contenteditable=plaintext-only>0</td><td contenteditable=plaintext-only></td><td contenteditable=plaintext-only>enable</td><td contenteditable=plaintext-only></td><td><button class=deleteBtn>Delete</button><button class=undoBtn>Undo</button></td>`; } else { tr.innerHTML=`<td contenteditable=plaintext-only></td><td contenteditable=plaintext-only></td><td contenteditable=plaintext-only></td><td contenteditable=plaintext-only></td><td contenteditable=plaintext-only></td><td contenteditable=plaintext-only></td><td contenteditable=plaintext-only></td><td contenteditable=plaintext-only></td><td><button class=deleteBtn>Delete</button><button class=undoBtn>Undo</button></td>`; } tbody.appendChild(tr); tr.classList.add('row-added'); recordChange(kind,tr,''); }
+      function reset(kind){ const tbody=getTBody(kind); if(!tbody) return; tbody.innerHTML=state[kind].originalHTML; state[kind].history=[]; }
+      function undo(kind){ const last=state[kind].history.pop(); if(!last) return alert('No changes to undo.'); last.row.innerHTML=last.previousHTML; last.row.classList.remove('row-added','row-removed','row-edited'); }
+      async function save(kind){ if(!csrftoken) return alert('CSRF token missing. Are cookies enabled?'); let payload={}; let url=''; if(kind==='csnat'){ payload={ csnat: collectCentralSnat() }; url='/save-central-snat/'; } else { payload={ vips: collectVip() }; url='/save-vips/'; } try{ const resp=await fetch(url,{ method:'POST', headers:{'Content-Type':'application/json','X-CSRFToken':csrftoken}, body:JSON.stringify(payload) }); if(!resp.ok) throw new Error(`Save failed (${resp.status})`); alert('Saved successfully ✅'); }catch(err){ console.error(err); alert('Failed to save to server.'); } }
+      return { init };
+    })();
+    document.addEventListener('DOMContentLoaded', () => { natModule.init(); });
+  </script>
+
+  <script>
+    const udtModule = (() => { let originalHTML='', history=[];
+      function init(){ const tbody=document.querySelector('#udtTable tbody'); if(tbody) originalHTML=tbody.innerHTML; document.getElementById('udtParseBtn')?.addEventListener('click', parseUdtPaste); document.getElementById('udtAddRowBtn')?.addEventListener('click', addUdtRow); document.getElementById('udtResetBtn')?.addEventListener('click', reset); document.getElementById('udtGenerateCliBtn')?.addEventListener('click', generateUdtCli); document.getElementById('udtValidateCliBtn')?.addEventListener('click', validateUdtCli); document.getElementById('udtCopyCliBtn')?.addEventListener('click', copyUdtCli); document.getElementById('udtDownloadCliBtn')?.addEventListener('click', downloadUdtCli); document.getElementById('udtSaveBtn')?.addEventListener('click', saveUdt);
+        const table=document.getElementById('udtTable'); if(table){ table.addEventListener('click',(e)=>{ if(e.target.matches('.deleteBtn')){ const row=e.target.closest('tr'); history.push({row,prev:row.innerHTML}); row.classList.add('row-removed'); } if(e.target.matches('.undoBtn')){ const row=e.target.closest('tr'); const idx=history.findLastIndex(h=>h.row===row); if(idx>=0){ const snap=history.splice(idx,1)[0]; row.innerHTML=snap.prev; } row.classList.remove('row-removed','row-added','row-edited'); } }); table.addEventListener('focusin',(e)=>{ if(e.target.matches('td[contenteditable]')){ const row=e.target.closest('tr'); row.dataset.prev=row.innerHTML; } }); table.addEventListener('input',(e)=>{ if(e.target.matches('td[contenteditable]')){ const row=e.target.closest('tr'); const prev=row.dataset.prev||row.innerHTML; history.push({row,prev}); row.classList.add('row-edited'); } }); }
+      }
+      function addUdtRow(){ const tbody=document.querySelector('#udtTable tbody'); if(!tbody) return; const tr=document.createElement('tr'); tr.innerHTML=`<td contenteditable=plaintext-only></td><td contenteditable=plaintext-only></td><td contenteditable=plaintext-only></td><td><button class=deleteBtn>Delete</button><button class=undoBtn>Undo</button></td>`; tbody.appendChild(tr); tr.classList.add('row-added'); history.push({row:tr,prev:''}); }
+      function reset(){ const tbody=document.querySelector('#udtTable tbody'); if(!tbody) return; tbody.innerHTML=originalHTML; history=[]; }
+      function parseUdtPaste(){ const ta=document.getElementById('udtPasteArea'); if(!ta) return alert('Paste area not found.'); const text=(ta.value||'').trim(); if(!text) return alert('Nothing to parse.'); const lines=text.split(/\r?\n/); const rows=[]; lines.forEach(line=>{ let parts=line.split(/\t|,|\|/).map(s=>s.trim()).filter(Boolean); if(parts.length<3){ const p2=line.trim().split(/\s+/); if(p2.length>=3){ rows.push({ public:p2[0], private:p2.slice(1,p2.length-1).join(' '), type:p2[p2.length-1].toUpperCase() }); } return; } rows.push({ public:parts[0], private:parts[1], type:parts[2].toUpperCase() }); }); const tbody=document.querySelector('#udtTable tbody'); if(!tbody) return alert('UDT table body not found.'); tbody.innerHTML=''; rows.forEach(r=>{ const tr=document.createElement('tr'); tr.innerHTML=`<td contenteditable=plaintext-only>${escapeForti(r.public)}</td><td contenteditable=plaintext-only>${escapeForti(r.private)}</td><td contenteditable=plaintext-only>${escapeForti(r.type)}</td><td><button class=deleteBtn>Delete</button><button class=undoBtn>Undo</button></td>`; tbody.appendChild(tr); }); }
+      function buildIppoolFromUdt(udtRows){ const publics=new Set(udtRows.filter(r=>r.type==='SNAT').map(r=>(r.public||'').trim()).filter(Boolean)); if(!publics.size) return ''; let out='config firewall ippool\n'; publics.forEach(pub=>{ out+=`    edit \"host-${escapeForti(pub)}\"\n`; out+=`        set arp-reply disable\n`; out+=`        set startip ${escapeForti(pub)}\n`; out+=`        set endip ${escapeForti(pub)}\n`; out+=`    next\n`; }); out+='end\n'; return out; }
+      function buildCentralSnatFromUdt(udtRows){ const byPublic=new Map(); udtRows.filter(r=>r.type==='SNAT').forEach(r=>{ const pub=(r.public||'').trim(); if(!pub) return; const privs=splitNames(r.private); if(!privs.length) return; if(!byPublic.has(pub)) byPublic.set(pub,new Set()); privs.forEach(p=>byPublic.get(pub).add(p)); }); if(!byPublic.size) return ''; let out='config firewall central-snat-map\n'; let idx=1; for(const [pub,set] of byPublic.entries()){ out+=`    edit ${idx++}\n`; out+=`        set srcintf \"inside\"\n`; out+=`        set dstintf \"outside\"\n`; out+=`        set orig-addr ${fortiQuoteList(Array.from(set))}\n`; out+=`        set dst-addr \"all\"\n`; out+=`        set nat-ippool \"host-${escapeForti(pub)}\"\n`; out+=`    next\n`; } out+='end\n'; return out; }
+      function buildVipFromUdt(udtRows){ const dnatRows=udtRows.filter(r=>r.type==='DNAT'); if(!dnatRows.length) return ''; let out='config firewall vip\n'; dnatRows.forEach(r=>{ const pub=(r.public||'').trim(); const priv=(r.private||'').trim(); if(!pub||!priv) return; const name=`${pub}-to-${priv}`; out+=`    edit \"${escapeForti(name)}\"\n`; out+=`        set extintf \"any\"\n`; out+=`        set extip ${escapeForti(pub)}\n`; out+=`        set mappedip \"${escapeForti(priv)}\"\n`; out+=`        set arp-reply disable\n`; out+=`        set nat-source-vip enable\n`; out+=`    next\n`; }); out+='end\n'; return out; }
+      function generateUdtCli(){ const udtRows=collectUdt(); const ippool=buildIppoolFromUdt(udtRows); const csnat=buildCentralSnatFromUdt(udtRows); const vips=buildVipFromUdt(udtRows); const text=`${ippool}\n${csnat}\n${vips}`.trim(); const out=document.getElementById('udtCliOutput'); if(out) out.value=text; else alert('UDT CLI output textarea not found.'); }
+      function validateUdtCli(){ const text=(document.getElementById('udtCliOutput').value||'').trim(); if(!text) return alert('No UDT CLI to validate.'); const hasIppool=/config\s+firewall\s+ippool/i.test(text); const hasCsnat=/config\s+firewall\s+central-snat-map/i.test(text); const hasVip=/config\s+firewall\s+vip/i.test(text); const ends=(text.match(/\nend/g)||[]).length>=3; const errs=[]; if(!hasIppool) errs.push('Missing IPPool section.'); if(!hasCsnat) errs.push('Missing Central SNAT section.'); if(!hasVip) errs.push('Missing VIP section.'); if(!ends) errs.push('Ensure each section ends with \"end\".'); alert(errs.length ? 'Validation failed:\n\n'+errs.join('\n') : 'UDT CLI validation passed ✅'); }
+      async function copyUdtCli(){ const text=document.getElementById('udtCliOutput').value||''; if(!text.trim()) return alert('Nothing to copy.'); try{ if(navigator.clipboard?.writeText) await navigator.clipboard.writeText(text); else { const ta=document.getElementById('udtCliOutput'); ta.select(); document.execCommand('copy'); } alert('UDT CLI copied ✅'); }catch(err){ console.error(err); alert('Copy failed.'); } }
+      function downloadUdtCli(){ const text=document.getElementById('udtCliOutput').value||''; if(!text.trim()) return alert('Nothing to download.'); const blob=new Blob([text],{type:'text/plain'}); const url=URL.createObjectURL(blob); const a=document.createElement('a'); a.href=url; a.download='UDT_Fortigate.txt'; a.click(); URL.revokeObjectURL(url); }
+      async function saveUdt(){ if(!csrftoken) return alert('CSRF token missing.'); try{ const resp=await fetch('/save-udt/',{ method:'POST', headers:{'Content-Type':'application/json','X-CSRFToken':csrftoken}, body:JSON.stringify({ udt: collectUdt() }) }); if(!resp.ok) throw new Error('Save UDT failed'); alert('UDT rows saved ✅'); }catch(err){ console.error(err); alert('Failed to save UDT rows.'); } }
+      return { init };
+    })();
+    document.addEventListener('DOMContentLoaded', () => { udtModule.init(); });
+  </script>
+</body>
+</html>
