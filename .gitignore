@@ -1,1 +1,4 @@
 .hfw
+# Ignore Python cache files
+./hfw/hfw/__pycache__/
+*.pyc
