@@ -564,7 +564,9 @@ end"></textarea>
 
       try{
         const resp = await fetch('/export-nat-excel/',{
-          method:'POST', headers:{'Content-Type':'application/json','X-CSRFToken':csrftoken},
+          method:'POST',
+          credentials: 'include', // <-- ensures cookies (session + CSRF) are sent
+          headers:{'Content-Type':'application/json','X-CSRFToken':csrftoken},
           body: JSON.stringify({ csnat: csnat, vip: vipMerged })
         });
         if(!resp.ok) throw new Error('Export failed');

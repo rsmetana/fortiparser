@@ -10,11 +10,11 @@ https://docs.djangoproject.com/en/5.2/howto/deployment/wsgi/
 import os
 import sys
 
-path = '/root/hfw-project/'
+path = '/home/rsmetana/fortiparser/hfw'
 if path not in sys.path:
     sys.path.append(path)
 
-site_packages_path = '/root/hfw-project/.hfw/lib/python3.10/site-packages'
+site_packages_path = '/home/rsmetana/fortiparser/.hfw/lib/python3.12/site-packages'
 if site_packages_path not in sys.path:
     sys.path.append(site_packages_path)
 

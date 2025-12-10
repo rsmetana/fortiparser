@@ -2,6 +2,7 @@
 from django.shortcuts import render
 from django.http import JsonResponse, HttpResponse
 from django.views.decorators.csrf import csrf_protect
+from django.views.decorators.csrf import csrf_exempt
 from django.views.decorators.http import require_POST
 from .forms import PolicyCliForm, NatCliForm
 
@@ -90,7 +91,7 @@ def save_nat(request):
 
 # ------------ Export Excel endpoint ------------
 @require_POST
-@csrf_protect
+@csrf_exempt
 def export_nat_excel(request):
     """
     Accepts JSON { csnat: [...], vip: [...] } and returns an Excel file with columns:
