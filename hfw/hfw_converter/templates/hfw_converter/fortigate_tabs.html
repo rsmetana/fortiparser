@@ -604,7 +604,32 @@ end"></textarea>
       function parseUdtPaste(){ const ta=document.getElementById('udtPasteArea'); if(!ta) return alert('Paste area not found.'); const text=(ta.value||'').trim(); if(!text) return alert('Nothing to parse.'); const lines=text.split(/\r?\n/); const rows=[]; lines.forEach(line=>{ let parts=line.split(/\t|,|\|/).map(s=>s.trim()).filter(Boolean); if(parts.length<3){ const p2=line.trim().split(/\s+/); if(p2.length>=3){ rows.push({ public:p2[0], private:p2.slice(1,p2.length-1).join(' '), type:p2[p2.length-1].toUpperCase() }); } return; } rows.push({ public:parts[0], private:parts[1], type:parts[2].toUpperCase() }); }); const tbody=document.querySelector('#udtTable tbody'); if(!tbody) return alert('UDT table body not found.'); tbody.innerHTML=''; rows.forEach(r=>{ const tr=document.createElement('tr'); tr.innerHTML=`<td contenteditable=plaintext-only>${escapeForti(r.public)}</td><td contenteditable=plaintext-only>${escapeForti(r.private)}</td><td contenteditable=plaintext-only>${escapeForti(r.type)}</td><td><button class=deleteBtn>Delete</button><button class=undoBtn>Undo</button></td>`; tbody.appendChild(tr); }); }
       function buildIppoolFromUdt(udtRows){ const publics=new Set(udtRows.filter(r=>r.type==='SNAT').map(r=>(r.public||'').trim()).filter(Boolean)); if(!publics.size) return ''; let out='config firewall ippool\n'; publics.forEach(pub=>{ out+=`    edit \"host-${escapeForti(pub)}\"\n`; out+=`        set arp-reply disable\n`; out+=`        set startip ${escapeForti(pub)}\n`; out+=`        set endip ${escapeForti(pub)}\n`; out+=`    next\n`; }); out+='end\n'; return out; }
       function buildCentralSnatFromUdt(udtRows){ const byPublic=new Map(); udtRows.filter(r=>r.type==='SNAT').forEach(r=>{ const pub=(r.public||'').trim(); if(!pub) return; const privs=splitNames(r.private); if(!privs.length) return; if(!byPublic.has(pub)) byPublic.set(pub,new Set()); privs.forEach(p=>byPublic.get(pub).add(p)); }); if(!byPublic.size) return ''; let out='config firewall central-snat-map\n'; let idx=1; for(const [pub,set] of byPublic.entries()){ out+=`    edit ${idx++}\n`; out+=`        set srcintf \"inside\"\n`; out+=`        set dstintf \"outside\"\n`; out+=`        set orig-addr ${fortiQuoteList(Array.from(set))}\n`; out+=`        set dst-addr \"all\"\n`; out+=`        set nat-ippool \"host-${escapeForti(pub)}\"\n`; out+=`    next\n`; } out+='end\n'; return out; }
-      function buildVipFromUdt(udtRows){ const dnatRows=udtRows.filter(r=>r.type==='DNAT'); if(!dnatRows.length) return ''; let out='config firewall vip\n'; dnatRows.forEach(r=>{ const pub=(r.public||'').trim(); const priv=(r.private||'').trim(); if(!pub||!priv) return; const name=`${pub}-to-${priv}`; out+=`    edit \"${escapeForti(name)}\"\n`; out+=`        set extintf \"any\"\n`; out+=`        set extip ${escapeForti(pub)}\n`; out+=`        set mappedip \"${escapeForti(priv)}\"\n`; out+=`        set arp-reply disable\n`; out+=`        set nat-source-vip enable\n`; out+=`    next\n`; }); out+='end\n'; return out; }
+      function buildVipFromUdt(udtRows){
+  const dnatRows = udtRows.filter(r => r.type === 'DNAT');
+  if (!dnatRows.length) return '';
+
+  // Local helper to remove surrounding double quotes (if any)
+  const stripQuotes = s => (s || '').trim().replace(/^"+|"+$/g, '');
+
+  let out = 'config firewall vip\n';
+  dnatRows.forEach(r => {
+    const pub  = stripQuotes(r.public);
+    const priv = stripQuotes(r.private);
+    if (!pub || !priv) return;
+
+    const name = `${pub}-to-${priv}`;
+    out += `    edit \"${escapeForti(name)}\"\n`;
+    out += `        set extintf \"any\"\n`;
+    out += `        set extip ${pub}\n`;                      // IPs: no quotes
+    out += `        set mappedip \"${escapeForti(priv)}\"\n`; // mappedip: quoted once
+    out += `        set arp-reply disable\n`;
+    out += `        set nat-source-vip enable\n`;
+    out += `    next\n`;
+  });
+  out += 'end\n';
+  return out;
+}
+
       function generateUdtCli(){ const udtRows=collectUdt(); const ippool=buildIppoolFromUdt(udtRows); const csnat=buildCentralSnatFromUdt(udtRows); const vips=buildVipFromUdt(udtRows); const text=`${ippool}\n${csnat}\n${vips}`.trim(); const out=document.getElementById('udtCliOutput'); if(out) out.value=text; else alert('UDT CLI output textarea not found.'); }
       function validateUdtCli(){ const text=(document.getElementById('udtCliOutput').value||'').trim(); if(!text) return alert('No UDT CLI to validate.'); const hasIppool=/config\s+firewall\s+ippool/i.test(text); const hasCsnat=/config\s+firewall\s+central-snat-map/i.test(text); const hasVip=/config\s+firewall\s+vip/i.test(text); const ends=(text.match(/\nend/g)||[]).length>=3; const errs=[]; if(!hasIppool) errs.push('Missing IPPool section.'); if(!hasCsnat) errs.push('Missing Central SNAT section.'); if(!hasVip) errs.push('Missing VIP section.'); if(!ends) errs.push('Ensure each section ends with \"end\".'); alert(errs.length ? 'Validation failed:\n\n'+errs.join('\n') : 'UDT CLI validation passed ✅'); }
       async function copyUdtCli(){ const text=document.getElementById('udtCliOutput').value||''; if(!text.trim()) return alert('Nothing to copy.'); try{ if(navigator.clipboard?.writeText) await navigator.clipboard.writeText(text); else { const ta=document.getElementById('udtCliOutput'); ta.select(); document.execCommand('copy'); } alert('UDT CLI copied ✅'); }catch(err){ console.error(err); alert('Copy failed.'); } }
