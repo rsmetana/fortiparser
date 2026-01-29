@@ -51,8 +51,21 @@
 
     /* Row removal visuals */
     tr.row-removed > td { background: #2a1316 !important; border-color: var(--danger) !important; }
+ /* Disabled policy rows: yellow highlight */
+ tr.row-disabled > td {
+   background: #4d4400 !important;
+   border-color: #8c7a00 !important;
+ }
+ tr.row-disabled:hover > td {
+   background: #584c00 !important;
+ }
+
     tr.row-removed:hover > td { background: #2a1316 !important; }
-  </style>
+  
+ .disableBtn { background:#8c7a00; border-color:#8c7a00; color:#0f1115; }
+ .disableBtn:hover { background:#a68e00; }
+
+</style>
 </head>
 <body>
   <h1>Fortigate CLI Parser</h1>
@@ -265,7 +278,7 @@ end"></textarea>
           if (!blockLines.length || !currentId) return; const blockText = blockLines.join('\n');
           const getSetRaw = (key) => { const r = new RegExp(`^\\s*set\\s+${key}\\s+(.+)$`, 'mi').exec(blockText); return r ? r[1].trim() : ''; };
           const getSetStr = (key) => (getSetRaw(key) || '').replace(/^"|"$/g, '');
-          results.push({ id: currentId, name: getSetStr('name'), srcintf: getSetRaw('srcintf'), dstintf: getSetRaw('dstintf'), action: getSetStr('action'), srcaddr: getSetRaw('srcaddr'), dstaddr: getSetRaw('dstaddr'), service: getSetRaw('service'), sslssh: getSetStr('ssl-ssh-profile'), schedule: getSetStr('schedule'), logtraffic: (getSetStr('logtraffic') || ''), utm: (/\bset\s+utm-status\s+enable\b/i.test(blockText)), comments: (getSetStr('comments') || getSetStr('comment')) });
+          results.push({ id: currentId, name: getSetStr('name'), srcintf: getSetRaw('srcintf'), dstintf: getSetRaw('dstintf'), action: getSetStr('action'), srcaddr: getSetRaw('srcaddr'), dstaddr: getSetRaw('dstaddr'), service: getSetRaw('service'), sslssh: getSetStr('ssl-ssh-profile'), schedule: getSetStr('schedule'), logtraffic: (getSetStr('logtraffic') || ''), utm: (/\bset\s+utm-status\s+enable\b/i.test(blockText)), comments: (getSetStr('comments') || getSetStr('comment')), status: getSetStr('status') });
         };
         for (let i=0;i<lines.length;i++) { const ln = lines[i]; const editMatch = /^\s*edit\s+("?[^\"]+"|\S+)\s*$/i.exec(ln); if (editMatch) { if (inBlock) flushBlock(); inBlock = true; blockLines = []; currentId = editMatch[1].replace(/^"|"$/g,'').trim(); continue; } if (/^\s*next\s*$/i.test(ln)) { flushBlock(); inBlock = false; blockLines = []; currentId = ''; continue; } if (inBlock) blockLines.push(ln); } if (inBlock) flushBlock(); }); return results; }
 
@@ -288,7 +301,7 @@ end"></textarea>
           <td class="logtraffic-cell"><input type="checkbox" class="cell-checkbox" /></td>
           <td class="utm-cell"><input type="checkbox" class="cell-checkbox" /></td>
           ${makeEditable('')}
-          <td><button class="deleteBtn">Delete</button><button class="undoBtn">Undo</button></td>`;
+          <td><button class="disableBtn toggleDisableBtn">Disable</button><button class="deleteBtn">Delete</button><button class="undoBtn">Undo</button></td>`;
         tbody.appendChild(tr);
         return;
       }
@@ -299,6 +312,9 @@ end"></textarea>
         const utmChecked = !!p.utm;
         tr.dataset.logtraffic = (p.logtraffic || '').trim();
         tr.dataset.utm = utmChecked ? 'enable' : '';
+ const status = (p.status || '').trim().toLowerCase();
+ tr.dataset.status = status;
+ if (status === 'disable') { tr.classList.add('row-disabled'); tr.title = 'Policy is disabled'; }
         tr.innerHTML = `
           <td draggable="true"><span class="row-drag-handle">≡</span> ${(p.id||'')}</td>
           ${makeEditable(p.name||'')}
@@ -312,7 +328,7 @@ end"></textarea>
           <td class="logtraffic-cell"><input type="checkbox" class="cell-checkbox" ${logChecked?'checked':''} /></td>
           <td class="utm-cell"><input type="checkbox" class="cell-checkbox" ${utmChecked?'checked':''} /></td>
           ${makeEditable(p.comments||'')}
-          <td><button class="deleteBtn">Delete</button><button class="undoBtn">Undo</button></td>`;
+          <td><button class="disableBtn toggleDisableBtn">Disable</button><button class="deleteBtn">Delete</button><button class="undoBtn">Undo</button></td>`;
         tbody.appendChild(tr);
       });
     }
@@ -352,6 +368,16 @@ end"></textarea>
 
         table.addEventListener('click', (e) => {
           if (e.target.matches('.deleteBtn')) { const row=e.target.closest('tr'); recordChange(row,row.innerHTML); row.classList.add('row-removed'); }
+      if (e.target.matches('.toggleDisableBtn')) {
+        const row=e.target.closest('tr');
+        const prev=row.innerHTML;
+        const isDisabled = (row.dataset.status||'').toLowerCase()==='disable';
+        // Toggle
+        row.dataset.status = isDisabled ? '' : 'disable';
+        if (isDisabled){ row.classList.remove('row-disabled'); row.removeAttribute('title'); }
+        else { row.classList.add('row-disabled'); row.title='Policy is disabled'; }
+        recordChange(row, prev);
+      }
           if (e.target.matches('.undoBtn')) { const row=e.target.closest('tr'); const i=changeHistory.findLastIndex(h=>h.row===row); if(i>=0){ const snap=changeHistory.splice(i,1)[0]; row.innerHTML=snap.previousState; } row.classList.remove('row-removed','row-added','row-edited'); }
         });
         table.addEventListener('focusin', (e) => { if (e.target.matches('td[contenteditable]')) { const row=e.target.closest('tr'); row.dataset.prev=row.innerHTML; } });
@@ -433,6 +459,8 @@ end"></textarea>
         if (utm) out += `        set utm-status enable\n`;
         if ((logtraffic || '').trim()) out += `        set logtraffic ${escapeForti(logtraffic.trim())}\n`;
         if (comments && comments.trim()) out += `        set comments \"${escapeForti(comments.trim())}\"\n`;
+        if ((obj.status || '').trim().toLowerCase() === 'disable') out += `        set status disable
+`;
         out += `    next\n`;
         return out;
       }
@@ -446,13 +474,13 @@ end"></textarea>
       }
 
       function onReset(){ const tbody=document.querySelector('#policyTable tbody'); if(!tbody) return; tbody.innerHTML=originalTableHTML; document.querySelectorAll('#policyTable tr').forEach(r=>r.classList.remove('row-added','row-removed','row-edited')); document.getElementById('policyCliOutput').value=''; changeHistory=[]; }
-      function onGenerateCli(){ const rows=document.querySelectorAll('#policyTable tbody tr'); let txt='config firewall policy\n'; const blocks=[]; rows.forEach(row=>{ if(row.classList.contains('row-removed')) return; const c=row.querySelectorAll('td'); if(c.length>=13){ const logCb=c[9].querySelector('input[type="checkbox"]'); const utmCb=c[10].querySelector('input[type="checkbox"]'); let logtraffic=''; if(logCb&&logCb.checked) logtraffic='all'; else if((row.dataset.logtraffic||'').toLowerCase()==='disable') logtraffic='disable'; const utm=!!(utmCb&&utmCb.checked); const clean=s=>sanitizeCellText(stripIcon(s||'')); const obj={ id:clean(c[0].textContent), name:clean(c[1].textContent), srcintf:clean(c[2].textContent), dstintf:clean(c[3].textContent), action:clean(c[4].textContent), srcaddr:clean(c[5].textContent), dstaddr:clean(c[6].textContent), service:clean(c[7].textContent), sslssh:clean(c[8].textContent), schedule:'', logtraffic, utm, comments:clean(c[11].textContent) }; const block=buildPolicyBlock(obj); if(block && block.trim()) blocks.push(block.trimEnd()); } }); txt+=blocks.join('\n'); txt+='\nend'; document.getElementById('policyCliOutput').value=txt; }
+      function onGenerateCli(){ const rows=document.querySelectorAll('#policyTable tbody tr'); let txt='config firewall policy\n'; const blocks=[]; rows.forEach(row=>{ if(row.classList.contains('row-removed')) return; const c=row.querySelectorAll('td'); if(c.length>=13){ const logCb=c[9].querySelector('input[type="checkbox"]'); const utmCb=c[10].querySelector('input[type="checkbox"]'); let logtraffic=''; if(logCb&&logCb.checked) logtraffic='all'; else if((row.dataset.logtraffic||'').toLowerCase()==='disable') logtraffic='disable'; const utm=!!(utmCb&&utmCb.checked); const clean=s=>sanitizeCellText(stripIcon(s||'')); const obj={ id:clean(c[0].textContent), name:clean(c[1].textContent), srcintf:clean(c[2].textContent), dstintf:clean(c[3].textContent), action:clean(c[4].textContent), srcaddr:clean(c[5].textContent), dstaddr:clean(c[6].textContent), service:clean(c[7].textContent), sslssh:clean(c[8].textContent), schedule:'', logtraffic, utm, comments:clean(c[11].textContent), status:(row.dataset.status || '') }; const block=buildPolicyBlock(obj); if(block && block.trim()) blocks.push(block.trimEnd()); } }); txt+=blocks.join('\n'); txt+='\nend'; document.getElementById('policyCliOutput').value=txt; }
       function onValidateCli(){ const t=document.getElementById('policyCliOutput').value||''; const {valid,errors}=validateCliText(t); alert(valid?'CLI validation passed ✅':'Validation failed:\n\n'+errors.join('\n')); }
       async function onCopyCli(){ const t=document.getElementById('policyCliOutput').value||''; if(!t.trim()) return alert('Nothing to copy.'); try{ if(navigator.clipboard?.writeText) await navigator.clipboard.writeText(t); else { const ta=document.getElementById('policyCliOutput'); ta.select(); document.execCommand('copy'); } alert('CLI copied to clipboard ✅'); }catch(e){ console.error(e); alert('Copy failed.'); } }
       function onDownloadCli(){ const t=document.getElementById('policyCliOutput').value||''; const {valid,errors}=validateCliText(t); if(!valid) return alert('Please fix validation errors before downloading:\n\n'+errors.join('\n')); const blob=new Blob([t],{type:'text/plain'}); const url=URL.createObjectURL(blob); const a=document.createElement('a'); a.href=url; a.download='fortigate_policy.txt'; a.click(); URL.revokeObjectURL(url); }
       function onUndo(){ if(!changeHistory.length) return alert('No changes to undo.'); const last=changeHistory.pop(); last.row.innerHTML=last.previousState; last.row.classList.remove('row-added','row-removed','row-edited'); }
       function onSave(){ const rows=document.querySelectorAll('#policyTable tbody tr'); const policies=[]; rows.forEach(row=>{ if(row.classList.contains('row-removed')) return; const c=row.querySelectorAll('td'); if(c.length>=13){ const logCb=c[9].querySelector('input[type="checkbox"]'); const utmCb=c[10].querySelector('input[type="checkbox"]'); let logtraffic=''; if(logCb&&logCb.checked) logtraffic='all'; else if((row.dataset.logtraffic||'').toLowerCase()==='disable') logtraffic='disable'; const utm=!!(utmCb&&utmCb.checked); const clean=s=>sanitizeCellText(stripIcon(s||'')); policies.push({ id:clean(c[0].textContent), name:clean(c[1].textContent), srcintf:clean(c[2].textContent), dstintf:clean(c[3].textContent), action:clean(c[4].textContent), srcaddr:clean(c[5].textContent), dstaddr:clean(c[6].textContent), service:clean(c[7].textContent), sslssh:clean(c[8].textContent), schedule:'', logtraffic, utm, comments:clean(c[11].textContent) }); } }); fetch('/save-policies/',{ method:'POST', headers:{'Content-Type':'application/json','X-CSRFToken':csrftoken}, body:JSON.stringify({ policies }) }).then(r=>r.ok?r.json():Promise.reject(r)).then(()=>alert('Policies saved successfully!')).catch(err=>{ console.error('Error:',err); alert('Failed to save policies to server.'); }); }
-      function onDownloadDeleted(){ const rows=document.querySelectorAll('#policyTable tbody tr.row-removed'); const blocks=[]; rows.forEach(row=>{ const c=row.querySelectorAll('td'); if(c.length>=13){ const logCb=c[9].querySelector('input[type="checkbox"]'); const utmCb=c[10].querySelector('input[type="checkbox"]'); let logtraffic=''; if(logCb&&logCb.checked) logtraffic='all'; else if((row.dataset.logtraffic||'').toLowerCase()==='disable') logtraffic='disable'; const utm=!!(utmCb&&utmCb.checked); const stripIcon=s=>(s||'').replace(/[≡]/g,'').trim(); const clean=s=>sanitizeCellText(stripIcon(s||'')); const obj={ id:clean(c[0].textContent), name:clean(c[1].textContent), srcintf:clean(c[2].textContent), dstintf:clean(c[3].textContent), action:clean(c[4].textContent), srcaddr:clean(c[5].textContent), dstaddr:clean(c[6].textContent), service:clean(c[7].textContent), sslssh:clean(c[8].textContent), schedule:'', logtraffic, utm, comments:clean(c[11].textContent) }; const block=buildPolicyBlock(obj); if(block && block.trim()) blocks.push(block.trimEnd()); } }); if(!blocks.length) return alert('No deleted rules with details to download.'); let cli='config firewall policy\n'+blocks.join('\n')+'\nend\n'; const blob=new Blob([cli],{type:'text/plain'}); const url=URL.createObjectURL(blob); const a=document.createElement('a'); a.href=url; a.download='fortigate_policy_deleted_full.txt'; a.click(); URL.revokeObjectURL(url); }
+      function onDownloadDeleted(){ const rows=document.querySelectorAll('#policyTable tbody tr.row-removed'); const blocks=[]; rows.forEach(row=>{ const c=row.querySelectorAll('td'); if(c.length>=13){ const logCb=c[9].querySelector('input[type="checkbox"]'); const utmCb=c[10].querySelector('input[type="checkbox"]'); let logtraffic=''; if(logCb&&logCb.checked) logtraffic='all'; else if((row.dataset.logtraffic||'').toLowerCase()==='disable') logtraffic='disable'; const utm=!!(utmCb&&utmCb.checked); const stripIcon=s=>(s||'').replace(/[≡]/g,'').trim(); const clean=s=>sanitizeCellText(stripIcon(s||'')); const obj={ id:clean(c[0].textContent), name:clean(c[1].textContent), srcintf:clean(c[2].textContent), dstintf:clean(c[3].textContent), action:clean(c[4].textContent), srcaddr:clean(c[5].textContent), dstaddr:clean(c[6].textContent), service:clean(c[7].textContent), sslssh:clean(c[8].textContent), schedule:'', logtraffic, utm, comments:clean(c[11].textContent), status:(row.dataset.status || '') }; const block=buildPolicyBlock(obj); if(block && block.trim()) blocks.push(block.trimEnd()); } }); if(!blocks.length) return alert('No deleted rules with details to download.'); let cli='config firewall policy\n'+blocks.join('\n')+'\nend\n'; const blob=new Blob([cli],{type:'text/plain'}); const url=URL.createObjectURL(blob); const a=document.createElement('a'); a.href=url; a.download='fortigate_policy_deleted_full.txt'; a.click(); URL.revokeObjectURL(url); }
 
       return { init };
     })();
@@ -639,5 +667,38 @@ end"></textarea>
     })();
     document.addEventListener('DOMContentLoaded', () => { udtModule.init(); });
   </script>
+
+<script>
+(function(){
+  function onceDOMReady(fn){ if(document.readyState==='loading'){ document.addEventListener('DOMContentLoaded', fn); } else { fn(); } }
+  function serviceTokens(txt){
+    const raw = (txt||'').trim(); if(!raw) return [];
+    let parts = [];
+    try { parts = (window.splitNames ? splitNames(raw) : raw.split(/\s+/)); } catch(e){ parts = raw.split(/\s+/); }
+    const out = []; const seen = new Set();
+    parts.forEach(p => { String(p).split(',').forEach(x => { const t = x.trim(); if(t && !seen.has(t)){ seen.add(t); out.push(t); } }); });
+    return out;
+  }
+  function cleanCellText(s){ const t=(s||'').replace(/[≡]/g,''); try { return sanitizeCellText?sanitizeCellText(t):t.trim(); } catch(e){ return t.trim(); } }
+  function getKeyFromRow(c){ return { srcintf:cleanCellText(c[2].textContent).toLowerCase(), dstintf:cleanCellText(c[3].textContent).toLowerCase(), srcaddr:cleanCellText(c[5].textContent).toLowerCase(), dstaddr:cleanCellText(c[6].textContent).toLowerCase(), comments:cleanCellText(c[11].textContent).toLowerCase() }; }
+  function sameKey(a,b){ return a.srcintf===b.srcintf && a.dstintf===b.dstintf && a.srcaddr===b.srcaddr && a.dstaddr===b.dstaddr && a.comments===b.comments; }
+  function mergePolicies(){
+    const tbody=document.querySelector('#policyTable tbody'); if(!tbody) return alert('Policy table not found.');
+    const rows=Array.from(tbody.querySelectorAll('tr')); if(!rows.length) return alert('No rows to merge.');
+    let groups=0; const report=[];
+    for(let i=0;i<rows.length;i++){
+      const row=rows[i]; if(row.classList.contains('row-removed')) continue; const c=row.querySelectorAll('td'); if(c.length<13) continue;
+      const action=cleanCellText(c[4].textContent).toLowerCase(); if(action!=='accept') continue;
+      const key=getKeyFromRow(c); let services=serviceTokens(c[7].textContent); let anyLog=!!c[9].querySelector('input[type="checkbox"]').checked; let anyUtm=!!c[10].querySelector('input[type="checkbox"]').checked; const keptId=cleanCellText(c[0].textContent); const mergedIds=[];
+      let j=i+1; while(j<rows.length){ const r2=rows[j]; if(r2.classList.contains('row-removed')){ j++; continue; } const c2=r2.querySelectorAll('td'); if(c2.length<13) break; const act2=cleanCellText(c2[4].textContent).toLowerCase(); if(act2==='deny') break; if(act2!=='accept') break; const key2=getKeyFromRow(c2); if(!sameKey(key,key2)) break; serviceTokens(c2[7].textContent).forEach(t=>{ if(!services.includes(t)) services.push(t); }); if(!!c2[9].querySelector('input[type="checkbox"]').checked) anyLog=true; if(!!c2[10].querySelector('input[type="checkbox"]').checked) anyUtm=true; mergedIds.push(cleanCellText(c2[0].textContent)); r2.classList.add('row-removed'); j++; }
+      if(mergedIds.length){ groups++; c[1].textContent=`Merged_Rule_${groups}`; c[7].textContent=services.join(' '); const logCb=c[9].querySelector('input[type="checkbox"]'); if(logCb) logCb.checked=anyLog; const utmCb=c[10].querySelector('input[type="checkbox"]'); if(utmCb) utmCb.checked=anyUtm; const keyStr=`srcintf=${key.srcintf} dstintf=${key.dstintf} srcaddr=${key.srcaddr} dstaddr=${key.dstaddr} comments=${key.comments}`; report.push(`Merged_Rule_${groups}: kept ID ${keptId}; merged IDs: ${mergedIds.filter(Boolean).join(', ')}; ${keyStr}; services: ${services.join(' ')}`); i=j-1; }
+    }
+    if(!groups) return alert('No matching contiguous rules to merge.');
+    const text=report.join('\n')+'\n'; const blob=new Blob([text],{type:'text/plain'}); const url=URL.createObjectURL(blob); const a=document.createElement('a'); a.href=url; a.download='fortigate_policy_merged_report.txt'; document.body.appendChild(a); a.click(); a.remove(); URL.revokeObjectURL(url);
+  }
+  (function(){ const go=()=>{ const genBtn=document.getElementById('policyGenerateCliBtn'); if(!genBtn) return; const btn=document.createElement('button'); btn.type='button'; btn.id='policyMergeRulesBtn'; btn.textContent='Merge Matching Rules'; genBtn.insertAdjacentElement('afterend', btn); btn.addEventListener('click', mergePolicies); }; if(document.readyState==='loading'){ document.addEventListener('DOMContentLoaded', go); } else { go(); } })();
+})();
+</script>
+
 </body>
 </html>
