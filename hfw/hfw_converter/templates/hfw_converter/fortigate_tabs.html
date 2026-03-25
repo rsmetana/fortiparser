@@ -72,6 +72,7 @@
   <div class="tabs">
     <button class="tab-btn active" data-tab="policiesTab">Policies</button>
     <button class="tab-btn" data-tab="natTab">NAT (Central SNAT + DNAT/VIP)</button>
+    <button class="tab-btn" data-tab="ciscoTab">Cisco LAN</button>
   </div>
 
   <!-- Policies Tab -->
@@ -698,6 +699,193 @@ end"></textarea>
   }
   (function(){ const go=()=>{ const genBtn=document.getElementById('policyGenerateCliBtn'); if(!genBtn) return; const btn=document.createElement('button'); btn.type='button'; btn.id='policyMergeRulesBtn'; btn.textContent='Merge Matching Rules'; genBtn.insertAdjacentElement('afterend', btn); btn.addEventListener('click', mergePolicies); }; if(document.readyState==='loading'){ document.addEventListener('DOMContentLoaded', go); } else { go(); } })();
 })();
+</script>
+<!-- Cisco LAN Tab -->
+<div id="ciscoTab" class="tab-content">
+  <h3>Cisco LAN → hosts.yml (multi-file, loopbacks ignored, DHCP detection)</h3>
+  <div class="controls">
+    <label><b>Select files</b>: <input id="filePick" type="file" multiple accept=".txt,.cfg,.conf,.log" /></label>
+    <label><b>or folder</b>: <input id="dirPick" type="file" webkitdirectory directory multiple /></label>
+    <button id="btnParse">Parse</button>
+    <button id="btnGen" disabled>Generate hosts.yml</button>
+    <button id="btnDl" disabled>Download hosts.yml</button>
+    <button id="btnReset">Reset</button>
+  </div>
+  
+<div
+  id="dropZone"
+  class="table-container"
+  style="text-align:center;padding:20px;height:120px"
+>
+Drop Cisco files here</div>
+  <h4>hosts.yml (preview)</h4>
+  <textarea id="yamlOut" class="cliOutput" readonly></textarea>
+</div>
+<script>
+/* =======================
+   Cisco LAN Parser
+   ======================= */
+(function(){
+  const $ = id => document.getElementById(id);
+  const filePick = $('filePick');
+  const dirPick  = $('dirPick');
+  const drop     = $('dropZone');
+  const btnParse = $('btnParse');
+  const btnGen   = $('btnGen');
+  const btnDl    = $('btnDl');
+  const btnReset = $('btnReset');
+  const out      = $('yamlOut');
+
+  if (!filePick || !btnParse || !drop || !out) {
+    console.error('Cisco LAN: required DOM elements not found');
+    return;
+  }
+
+  let devices = {};
+  let yamlText = '';
+
+  const toBase = name => (name||'device').replace(/\.(txt|cfg|conf|config|log)$/i,'');
+
+  /* ---------- IPv4 helpers ---------- */
+  const ipToInt = ip => ip.split('.').reduce((a,b)=> (a<<8) + (+b&255), 0) >>> 0;
+  const intToIp = n => [24,16,8,0].map(s => (n>>>s)&255).join('.');
+  const maskFromPfx = p => {
+    p = Number(p);
+    let m = p===0 ? 0 : (0xffffffff << (32-p)) >>> 0;
+    return [24,16,8,0].map(s=> (m>>>s)&255).join('.');
+  };
+  const networkOf = (ip, mask) => intToIp(ipToInt(ip) & ipToInt(mask));
+
+  function newIfaceFor(kind, id){
+    if(kind==='loopback') return null;
+    if(id===1) return { name:'x1', description:'Customer LAN' };
+    return { name:`vlan${id}`, type:'vlan', description:`vlan${id}` };
+  }
+
+  /* ---------- Interface parsing ---------- */
+  function parseTextInterfaces(text){
+    const lines = (text||'').replace(/\r/g,'').split('\n');
+    let cur=null, curType=null; const found=[];
+    const push=()=>{
+      if(!cur) return;
+      if(cur.helper) cur.helper=[...new Set(cur.helper)];
+      found.push(cur); cur=null; curType=null;
+    };
+
+    for(const line of lines){
+      let m;
+      if((m=line.match(/^\s*interface\s+Vlan(\d+)/i))){ push(); curType='vlan'; cur=newIfaceFor('vlan',+m[1]); continue; }
+      if((m=line.match(/^\s*interface\s+BDI(\d+)/i))){ push(); curType='bdi'; cur=newIfaceFor('bdi',+m[1]); continue; }
+      if((m=line.match(/^\s*interface\s+Loopback/i))){ push(); cur=null; continue; }
+      if(!cur) continue;
+
+      if((m=line.match(/^\s*description\s+(.+)/i))){ if(cur.name!=='x1') cur.description=m[1].trim(); }
+      if((m=line.match(/ip address (\d+\.\d+\.\d+\.\d+) (\d+\.\d+\.\d+\.\d+)( secondary)?/i))){
+        const ip=m[1], mask=m[2];
+        if(!cur.ip){ cur.ip=ip; cur.mask=mask; }
+        else { cur.secondary_ip=cur.secondary_ip||[]; cur.secondary_ip.push({ip,mask}); }
+      }
+      if((m=line.match(/ip helper-address (\d+\.\d+\.\d+\.\d+)/i))){
+        cur.helper=cur.helper||[]; cur.helper.push(m[1]);
+      }
+    }
+    push();
+    return found;
+  }
+
+  /* ---------- DHCP pools ---------- */
+  function parseDhcpPools(text){
+    const lines=(text||'').split('\n');
+    const pools=[]; let pool=null;
+    for(const line of lines){
+      let m;
+      if((m=line.match(/ip dhcp pool (.+)/i))){
+        if(pool) pools.push(pool);
+        pool={name:m[1].trim()};
+      }
+      if(pool && (m=line.match(/network (\d+\.\d+\.\d+\.\d+) (\d+\.\d+\.\d+\.\d+)/))){
+        pool.network=m[1]; pool.mask=m[2];
+      }
+    }
+    if(pool) pools.push(pool);
+    return pools.filter(p=>p.network && p.mask);
+  }
+
+  function addToDevice(deviceKey, ifaces){
+    devices[deviceKey] ??= { hostname:'0.0.0.0', groups:['fortigates'], data:{interfaces:[]} };
+    const map=new Map(devices[deviceKey].data.interfaces.map(i=>[i.name,i]));
+    for(const i of ifaces) map.set(i.name,i);
+    devices[deviceKey].data.interfaces=[...map.values()];
+  }
+
+  function mapDhcpToInterfaces(deviceKey,text){
+    const pools=parseDhcpPools(text);
+    const ifs=devices[deviceKey]?.data?.interfaces||[];
+    for(const p of pools){
+      const net=networkOf(p.network,p.mask);
+      for(const i of ifs){
+        if(i.ip && networkOf(i.ip,i.mask)===net) i.build_dhcp_server=true;
+        (i.secondary_ip||[]).forEach(s=>{
+          if(networkOf(s.ip,s.mask)===net) i.build_dhcp_server=true;
+        });
+      }
+    }
+  }
+
+  function emitYaml(){
+    let y='';
+    for(const k of Object.keys(devices).sort()){
+      const d=devices[k];
+      y+=`${k}:\n  hostname: ${d.hostname}\n  groups:\n  - fortigates\n  data:\n    interfaces:\n`;
+      for(const i of d.data.interfaces.sort((a,b)=>a.name.localeCompare(b.name))){
+        y+=`    - name: ${i.name}\n`;
+        if(i.description) y+=`      description: ${i.description}\n`;
+        if(i.ip) y+=`      ip: ${i.ip}\n      mask: ${i.mask}\n`;
+        if(i.secondary_ip){
+          y+=`      secondary_ip:\n`;
+          i.secondary_ip.forEach(s=>y+=`      - ip: ${s.ip}\n        mask: ${s.mask}\n`);
+        }
+        if(i.helper) y+=`      helper: [${i.helper.join(', ')}]\n`;
+        if(i.type) y+=`      type: ${i.type}\n`;
+        if(i.build_dhcp_server) y+=`      build_dhcp_server: true\n`;
+      }
+    }
+    return y;
+  }
+
+  async function readFiles(files){
+    for(const f of files){
+      const text=await f.text();
+      const key=toBase(f.name);
+      addToDevice(key, parseTextInterfaces(text));
+      mapDhcpToInterfaces(key,text);
+    }
+  }
+
+  /* ---------- Events ---------- */
+  btnParse.onclick=async()=>{
+    devices={}; out.value='';
+    const files=[...(filePick.files||[]),...(dirPick.files||[])];
+    if(!files.length) return alert('Select files first.');
+    await readFiles(files);
+    btnGen.disabled=false; alert('Parse complete.');
+  };
+
+  btnGen.onclick=()=>{ yamlText=emitYaml(); out.value=yamlText; btnDl.disabled=!yamlText; };
+  btnDl.onclick=()=>{ const b=new Blob([yamlText]); const a=document.createElement('a'); a.href=URL.createObjectURL(b); a.download='hosts.yml'; a.click(); };
+  btnReset.onclick=()=>{ devices={}; yamlText=''; out.value=''; btnGen.disabled=true; btnDl.disabled=true; };
+
+  drop.ondragover=e=>{ e.preventDefault(); };
+  drop.ondrop=async e=>{
+    e.preventDefault();
+    devices={}; out.value='';
+    await readFiles(e.dataTransfer.files);
+    btnGen.disabled=false;
+    alert('Parsed dropped files.');
+  };
+})();
+</script>
+
 </script>
 
 </body>
